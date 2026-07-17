@@ -29,6 +29,9 @@ typedef int (*fdt_setprop_fn)(void *, int, const char *, const void *, int);
 typedef int (*boot_linux_fdt_fn)(uint32_t, uint32_t, uint32_t,
                                  uint32_t, uint32_t, uint32_t);
 
+/* linux,initrd-start/end values captured as LK writes them into the FDT. */
+static uint32_t g_initrd_start, g_initrd_end;
+
 static int diag_fdt_setprop(void *fdt, int node, const char *name,
                             const void *value, int len)
 {
@@ -40,6 +43,16 @@ static int diag_fdt_setprop(void *fdt, int node, const char *name,
     printf("FDT magic=%x total=%x\n",
            fdt ? *(volatile uint32_t *)fdt : 0,
            fdt ? __builtin_bswap32(*((volatile uint32_t *)fdt + 1)) : 0);
+    if (name && value && len == 4) {
+        uint32_t val = __builtin_bswap32(*(const uint32_t *)value);
+        if (strncmp(name, "linux,initrd-start", 18) == 0) {
+            g_initrd_start = val;
+            printf("FDT initrd-start val=%x\n", val);
+        } else if (strncmp(name, "linux,initrd-end", 16) == 0) {
+            g_initrd_end = val;
+            printf("FDT initrd-end val=%x\n", val);
+        }
+    }
     return ret;
 }
 
@@ -62,9 +75,52 @@ __attribute__((naked)) static void diag_m3_trampoline(void)
 static int diag_boot_linux_fdt(uint32_t a0, uint32_t a1, uint32_t a2,
                                uint32_t a3, uint32_t a4, uint32_t a5)
 {
+    /* a0=kernel entry, a1=FDT, a3=machid (reloaded as r1 by the K32 stub). */
+    printf("M4 boot_linux_fdt args a0=%x a1=%x a2=%x a3=%x a4=%x a5=%x\n",
+           a0, a1, a2, a3, a4, a5);
     int ret = ((boot_linux_fdt_fn)0x4BD330E9)(a0, a1, a2, a3, a4, a5);
     printf("M4 boot_linux_fdt returned to boot_linux ret=%x\n", ret);
     return ret;
+}
+
+/* Runs with the full boot_linux_fdt register frame saved on the stack:
+ * frame[0]=r0 frame[6]=r6 frame[11]=fp; orig_sp is the pre-push SP. */
+__attribute__((used, noinline)) static void diag_k32_jump_log(const uint32_t *frame,
+                                                              uint32_t orig_sp)
+{
+    uint32_t r0 = frame[0];
+    uint32_t r6 = frame[6];
+    uint32_t fp = frame[11];
+    uint32_t machid = *(volatile uint32_t *)(orig_sp + 0x30);
+    const volatile uint32_t *zimg = (const volatile uint32_t *)fp;
+    const volatile uint32_t *fdt = (const volatile uint32_t *)r6;
+    const volatile uint8_t *rd = (const volatile uint8_t *)g_initrd_start;
+
+    /* Raw UART marker proves the hook ran even if printf state is broken. */
+    low_uart_put('J');
+    printf("K32J r0=%x machid=%x r2=%x fp=%x sp=%x\n",
+           r0, machid, r6, fp, orig_sp);
+    printf("K32J zimg %x %x %x %x magic24=%x\n",
+           zimg[0], zimg[1], zimg[2], zimg[3], zimg[9]);
+    printf("K32J fdt magic=%x total=%x\n",
+           fdt[0], __builtin_bswap32(fdt[1]));
+    printf("K32J initrd %x-%x head %x %x %x %x\n",
+           g_initrd_start, g_initrd_end, rd[0], rd[1], rd[2], rd[3]);
+}
+
+__attribute__((naked)) static void diag_k32_jump_trampoline(void)
+{
+    __asm__ volatile(
+        "push {r0-r12, lr}\n"     /* 14 regs: keeps SP 8-byte aligned */
+        "mov r0, sp\n"
+        "add r1, sp, #56\n"       /* pre-push SP -> machid slot */
+        "bl diag_k32_jump_log\n"
+        "pop {r0-r12, lr}\n"
+        /* Overwritten stub instructions, then the kernel handoff. */
+        "ldr r1, [sp, #48]\n"     /* machid slot (original frame) */
+        "mov r2, r6\n"            /* FDT */
+        "blx fp\n"                /* never returns */
+    );
 }
 
 static void patch_thumb_bl(uint32_t address, uint32_t target)
@@ -135,6 +191,15 @@ static void install_fdt_diagnostics(void)
         while (1) {}
     }
     patch_thumb_bl(0x4BD33DC0, (uint32_t)diag_boot_linux_fdt);
+
+    /* K32 jump stub: ldr r1,[sp,#48]; mov r2,r6; blx fp.  Log the final
+     * handoff registers and the memory the kernel is about to consume. */
+    volatile uint16_t *k32j = (void *)0x4BD33BCA;
+    if (k32j[0] != 0x990C || k32j[1] != 0x4632) {
+        printf("K32J hook mismatch: %04x %04x\n", k32j[0], k32j[1]);
+        while (1) {}
+    }
+    patch_thumb_bl(0x4BD33BCA, (uint32_t)diag_k32_jump_trampoline);
 }
 
 void set_led_ring(uint8_t colors[12][3]) {

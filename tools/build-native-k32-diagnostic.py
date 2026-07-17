@@ -22,21 +22,6 @@ EVT_SIZE = 0xC875
 # Inflate totalsize and zero-pad so the pass-2 copy has room to grow.
 EVT_PADDED_SIZE = 0x10000
 NEW_PAYLOAD_SIZE = ZIMAGE_END + EVT_PADDED_SIZE
-# /chosen/linux,initrd-start|end (stock blobs ship with zero FDT slack, so
-# property creation dies with FDT_ERR_NOSPACE). Inflate totalsize and zero-pad
-# the stored blob so libfdt has room to grow after the verbatim copy.
-EVT_PADDED_SIZE = 0x10000
-NEW_PAYLOAD_SIZE = ZIMAGE_END + EVT_PADDED_SIZE
-# blob is the only source of libfdt working room.  The stock blobs are packed
-# tight (slack=0), which makes the /chosen linux,initrd-* property creation
-# fail with FDT_ERR_NOSPACE.  Inflate totalsize and zero-pad the stored blob.
-EVT_PADDED_SIZE = 0x10000
-NEW_PAYLOAD_SIZE = ZIMAGE_END + EVT_PADDED_SIZE
-EVT_SHA256 = "f44630ba28f503dd7503bc7cffa2ee96a319acf2f58f1456bb6f5ff23d57dee1"
-# The raw blob has zero internal slack, so inflate totalsize and zero-pad
-# to give libfdt room to grow the struct/strings blocks.
-EVT_PADDED_SIZE = 0x10000
-NEW_PAYLOAD_SIZE = ZIMAGE_END + EVT_PADDED_SIZE
 EVT_SHA256 = "f44630ba28f503dd7503bc7cffa2ee96a319acf2f58f1456bb6f5ff23d57dee1"
 
 

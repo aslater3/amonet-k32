@@ -44,6 +44,14 @@ FDT setprop name=<property> ret=<ret,hex> len=<hex> fdt=<fdt pointer> node=<node
 FDT magic=<first u32 at fdt> total=<fdt_totalsize, host order>
 ```
 
+The two initrd u32 writes are additionally captured and echoed with their
+values:
+
+```text
+FDT initrd-start val=<hex>
+FDT initrd-end val=<hex>
+```
+
 (The payload mini-printf has no `%d`; signed returns print as two's-complement
 hex, e.g. FDT_ERR_BADOFFSET -4 shows as `fffffffc`.)
 
@@ -53,13 +61,16 @@ also installed:
 
 ```text
 M3 boot_linux_fdt common error epilogue reached
+M4 boot_linux_fdt args a0=<kernel> a1=<fdt> a2=<hex> a3=<machid> a4=<hex> a5=<hex>
 M4 boot_linux_fdt returned to boot_linux ret=<hex>
 ```
 
-If Linux entry succeeds, M3/M4 do not execute. If both appear, the watchdog is
-explained by `boot_linux_fdt()` returning and `boot_linux()` entering its stock
-infinite loop. The last `FDT setprop` line identifies the preceding property
-operation and its return value.
+If Linux entry succeeds, M3 and the M4 return line do not execute. If both M3
+and the M4 return appear, the watchdog is explained by `boot_linux_fdt()`
+returning and `boot_linux()` entering its stock infinite loop. The last
+`FDT setprop` line identifies the preceding property operation and its return
+value. The M4 args line records all six `boot_linux_fdt()` arguments,
+including the machid later reloaded as `r1` by the ARM32 jump stub.
 
 Expected pre-resume marker:
 
@@ -68,6 +79,22 @@ ABI handoff: native K32 loader + stock ARM32 jump bootopt=4 cached=0 opcode=2800
 ```
 
 The existing full-LK cache clean remains immediately before LK restart.
+
+A final hook sits on the ARM32 kernel-jump stub at `0x4BD33BCA` (stock
+`ldr r1,[sp,#48]; mov r2,r6; blx fp`). Immediately before the handoff it
+emits a raw UART `J` marker, then logs the exact kernel-consumed state:
+
+```text
+K32J r0=<hex> machid=<hex> r2=<fdt> fp=<kernel entry> sp=<hex>
+K32J zimg <first 4 words at fp> magic24=<word at fp+0x24, expect 16f2818>
+K32J fdt magic=<edfe0dd0> total=<10000>
+K32J initrd <start>-<end> head <first 4 bytes at initrd-start>
+```
+
+The initrd head bytes answer whether the ramdisk is physically present where
+`/chosen/linux,initrd-start` points (gzip ramdisks start `1f 8b`). After
+logging, the trampoline restores the full register frame and performs the
+stock `blx fp` handoff unchanged.
 
 This directory is its own Git repository and contains the patched Amonet
 source (`lk-payload/`), BROM injector source (`brom-payload/` and `modules/`),

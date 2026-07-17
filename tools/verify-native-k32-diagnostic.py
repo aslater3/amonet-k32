@@ -13,7 +13,7 @@ LK_BASE = 0x4BD00000
 LK_HEADER_SIZE = 0x200
 PAYLOAD_BLOCK = 223215
 RAW_PAYLOAD_OFFSET = 576
-RAW_PAYLOAD_SIZE = 0x150C
+RAW_PAYLOAD_SIZE = 0x17A4
 ZIMAGE_END = 0x578910
 EVT_SIZE = 0xC875
 EVT_PADDED_SIZE = 0x10000  # totalsize inflated + zero-padded: libfdt needs slack for fixups
@@ -23,11 +23,11 @@ EXPECTED = {
     "lk.bin": "5cb92494340417b1e5d18c3eaa34844dbcfec2cc8086451f087867cd06b15472",
     "boot-k32-native-evt.img": "ceecf9d93f8f5a02c89525b0cd07044826046d0ee9766f0007e99e7db5ba896a",
     "boot-k32-native-diag.hdr": "dbbff7eeb8830c0d6cde454a97dc31be73d1cba32e6be9b21fe3c7be2b659066",
-    "boot-k32-native-diag.payload": "1696899c450ff2f518367901c620dde4519af5345712842fa1c2d2bd394f7f1f",
-    "boot-k32-native-diag-wrapper.full.img": "c84706c9fa6b4c5e97cbfa08918723804ca1bd076c66bde31058aded688239fc",
-    "boot-k32-native-diag-wrapper.sparse.img": "2b55df16df7ef46321a7b7be70662c13b36265e2f35646f00ad146757358c774",
+    "boot-k32-native-diag.payload": "e8b4a3d47b618bd2b118827b3121e2af3702f308b7d751c37d04153428dc599a",
+    "boot-k32-native-diag-wrapper.full.img": "6d989015b4da2170cef56ddfe0d64d1a5e693400e78e1b4d320b370d1bc2e0d2",
+    "boot-k32-native-diag-wrapper.sparse.img": "abea61ed6c2e77befcb36a6698384b4a1769fcf37919f0d465853125c7285fb6",
 }
-RAW_PAYLOAD_SHA256 = "8fd25f43ab73fd8e617a8dc4e3f8c420a7bd999598267e7ba32867f39d738aaa"
+RAW_PAYLOAD_SHA256 = "a700a1e898b1b35545e6575580d0ca8641c1f7c8fc9cf12962dcc584ff0d97bd"
 
 FDT_CALLS = {
     0x4BD33206: (0xF007, 0xFFC3),
@@ -191,8 +191,15 @@ def main() -> None:
         b"ABI handoff: native K32 loader + stock ARM32 jump",
         b"FDT setprop name=%s ret=%x len=%x fdt=%x node=%x",
         b"FDT magic=%x total=%x",
+        b"FDT initrd-start val=%x",
+        b"FDT initrd-end val=%x",
         b"M3 boot_linux_fdt common error epilogue reached",
+        b"M4 boot_linux_fdt args a0=%x a1=%x a2=%x a3=%x a4=%x a5=%x",
         b"M4 boot_linux_fdt returned to boot_linux ret=%x",
+        b"K32J r0=%x machid=%x r2=%x fp=%x sp=%x",
+        b"K32J zimg %x %x %x %x magic24=%x",
+        b"K32J fdt magic=%x total=%x",
+        b"K32J initrd %x-%x head %x %x %x %x",
     ):
         require(marker in raw_payload, f"compiled payload marker missing: {marker!r}")
     require(b"K64 FDT prep" not in raw_payload, "obsolete cached=1 marker remains")
@@ -224,6 +231,7 @@ def main() -> None:
     print("native_k32_handoff_contract=PASS r0=0 r1=machid r2=fdt target=0x4BD33BCA")
     print("evt_only_boot_contract=PASS zimage=0x578910 evt_raw=0xC875 evt_padded=0x10000 kernel=0x588B10")
     print("fdt_diagnostic_contract=PASS setprop_calls=15 M3=0x4BD33888 M4=0x4BD33DC0")
+    print("k32_jump_contract=PASS stub=0x4BD33BCA stock=990c:4632 log=regs+zimg+fdt+initrd")
     print("wrapper_sparse_contract=PASS block=223215 logical=110MiB")
 
 
