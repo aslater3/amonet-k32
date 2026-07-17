@@ -13,20 +13,21 @@ LK_BASE = 0x4BD00000
 LK_HEADER_SIZE = 0x200
 PAYLOAD_BLOCK = 223215
 RAW_PAYLOAD_OFFSET = 576
-RAW_PAYLOAD_SIZE = 0x14B0
+RAW_PAYLOAD_SIZE = 0x150C
 ZIMAGE_END = 0x578910
 EVT_SIZE = 0xC875
+EVT_PADDED_SIZE = 0x10000  # totalsize inflated + zero-padded: libfdt needs slack for fixups
 EVT_SHA256 = "f44630ba28f503dd7503bc7cffa2ee96a319acf2f58f1456bb6f5ff23d57dee1"
 
 EXPECTED = {
     "lk.bin": "5cb92494340417b1e5d18c3eaa34844dbcfec2cc8086451f087867cd06b15472",
-    "boot-k32-native-evt.img": "87c2b9dc27625775549fd687268dd810d42ac660d6d6f0b398dfc52c5a962535",
+    "boot-k32-native-evt.img": "ceecf9d93f8f5a02c89525b0cd07044826046d0ee9766f0007e99e7db5ba896a",
     "boot-k32-native-diag.hdr": "dbbff7eeb8830c0d6cde454a97dc31be73d1cba32e6be9b21fe3c7be2b659066",
-    "boot-k32-native-diag.payload": "8e6b0d3399054872442aa5ed348e18d89be65766257f86d68e669a0060b7d27c",
-    "boot-k32-native-diag-wrapper.full.img": "e2400614b75e7a28941b19b76b7a1a46b6fe9ee8e1eb7dfe933d4aab4799c27a",
-    "boot-k32-native-diag-wrapper.sparse.img": "6fc1f50802632ba27653c7c54f8a195c4d245993baf8a987a29c3f58277a0f82",
+    "boot-k32-native-diag.payload": "1696899c450ff2f518367901c620dde4519af5345712842fa1c2d2bd394f7f1f",
+    "boot-k32-native-diag-wrapper.full.img": "c84706c9fa6b4c5e97cbfa08918723804ca1bd076c66bde31058aded688239fc",
+    "boot-k32-native-diag-wrapper.sparse.img": "2b55df16df7ef46321a7b7be70662c13b36265e2f35646f00ad146757358c774",
 }
-RAW_PAYLOAD_SHA256 = "9ed10c3c6534be4d9281a0fe681f449444e6d310ba732941cd268e29a26d07de"
+RAW_PAYLOAD_SHA256 = "8fd25f43ab73fd8e617a8dc4e3f8c420a7bd999598267e7ba32867f39d738aaa"
 
 FDT_CALLS = {
     0x4BD33206: (0xF007, 0xFFC3),
@@ -112,19 +113,25 @@ def verify_boot_image(image: bytes) -> None:
     kernel_size, kernel_addr, ramdisk_size, _, second_size, _, _, page_size, dt_size, _ = \
         struct.unpack_from("<10I", image, 8)
     require(kernel_addr == 0x40008000 and page_size == 0x800, "native K32 boot geometry changed")
-    require(kernel_size == 0x585385, "native K32 kernel size mismatch")
+    require(kernel_size == 0x588B10, "native K32 kernel size mismatch")
 
     kernel = image[page_size:page_size + kernel_size]
     require(kernel[:4] == bytes.fromhex("88168858"), "kernel MediaTek header missing")
     payload_size = struct.unpack_from("<I", kernel, 4)[0]
-    require(payload_size == 0x585185, "MediaTek payload size mismatch")
+    require(payload_size == 0x588910, "MediaTek payload size mismatch")
     payload = kernel[0x200:0x200 + payload_size]
     require(payload[0x24:0x28] == bytes.fromhex("18286f01"), "ARM zImage magic missing")
     require(struct.unpack_from("<II", payload, 0x28) == (0, ZIMAGE_END), "ARM zImage range changed")
     evt = payload[ZIMAGE_END:]
-    require(len(evt) == EVT_SIZE and digest(evt) == EVT_SHA256, "sole EVT DTB hash/size mismatch")
+    require(len(evt) == EVT_PADDED_SIZE, "padded EVT DTB size mismatch")
+    raw_evt = bytearray(evt[:EVT_SIZE])
+    struct.pack_into(">I", raw_evt, 4, EVT_SIZE)  # undo totalsize inflation before hashing
+    require(digest(bytes(raw_evt)) == EVT_SHA256, "raw EVT DTB content mismatch")
+    require(evt[EVT_SIZE:] == b"\0" * (EVT_PADDED_SIZE - EVT_SIZE),
+            "EVT padding is not zero-filled")
     require(evt[:4] == bytes.fromhex("d00dfeed"), "EVT FDT magic missing")
-    require(struct.unpack_from(">I", evt, 4)[0] == EVT_SIZE, "EVT FDT totalsize mismatch")
+    require(struct.unpack_from(">I", evt, 4)[0] == EVT_PADDED_SIZE,
+            "EVT FDT totalsize not inflated to 0x10000")
     require(payload.find(bytes.fromhex("d00dfeed")) == ZIMAGE_END, "EVT is not first appended FDT")
     require(payload.find(bytes.fromhex("d00dfeed"), ZIMAGE_END + 4) == -1,
             "more than one appended FDT remains")
@@ -182,9 +189,10 @@ def main() -> None:
     for marker in (
         b"Biscuit native K32 EVT diagnostic",
         b"ABI handoff: native K32 loader + stock ARM32 jump",
-        b"FDT setprop name=%s ret=%d len=%d",
+        b"FDT setprop name=%s ret=%x len=%x fdt=%x node=%x",
+        b"FDT magic=%x total=%x",
         b"M3 boot_linux_fdt common error epilogue reached",
-        b"M4 boot_linux_fdt returned to boot_linux ret=%d",
+        b"M4 boot_linux_fdt returned to boot_linux ret=%x",
     ):
         require(marker in raw_payload, f"compiled payload marker missing: {marker!r}")
     require(b"K64 FDT prep" not in raw_payload, "obsolete cached=1 marker remains")
@@ -214,8 +222,8 @@ def main() -> None:
 
     print("exact_lk_contract=PASS cached_selector=0x4BD641F4 stock_final=0x4BD33704")
     print("native_k32_handoff_contract=PASS r0=0 r1=machid r2=fdt target=0x4BD33BCA")
-    print("evt_only_boot_contract=PASS zimage=0x578910 evt=0xC875 kernel=0x585385")
-    print("fdt_diagnostic_contract=PASS setprop_calls=14 M3=0x4BD33888 M4=0x4BD33DC0")
+    print("evt_only_boot_contract=PASS zimage=0x578910 evt_raw=0xC875 evt_padded=0x10000 kernel=0x588B10")
+    print("fdt_diagnostic_contract=PASS setprop_calls=15 M3=0x4BD33888 M4=0x4BD33DC0")
     print("wrapper_sparse_contract=PASS block=223215 logical=110MiB")
 
 

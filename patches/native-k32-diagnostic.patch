@@ -1,6 +1,6 @@
 --- a/lk-payload/main.c
 +++ b/lk-payload/main.c
-@@ -25,17 +25,106 @@
+@@ -25,17 +25,116 @@
  uint64_t g_boot_a, g_boot_a_x, g_boot_b, g_boot_b_x, g_lk_a, g_lk_b, g_expdb, g_misc, g_recovery;
  uint8_t boot_recovery = 0;
  
@@ -19,7 +19,13 @@
 -            if (strncmp((char *)&bootopt_str[i + 0x12], "32", sizeof("32") - 1) == 0)
 -                return 0;
 +    int ret = ((fdt_setprop_fn)0x4BD3B191)(fdt, node, name, value, len);
-+    printf("FDT setprop name=%s ret=%d len=%d\n", name ? name : "(null)", ret, len);
++    /* mini-printf has no %d: signed values go out as %x (two's complement). */
++    printf("FDT setprop name=%s ret=%x len=%x fdt=%x node=%x\n",
++           name ? name : "(null)", ret, len, (uint32_t)fdt, (uint32_t)node);
++    /* Separate line: a faulting read of a bad fdt must not eat the line above. */
++    printf("FDT magic=%x total=%x\n",
++           fdt ? *(volatile uint32_t *)fdt : 0,
++           fdt ? __builtin_bswap32(*((volatile uint32_t *)fdt + 1)) : 0);
 +    return ret;
 +}
 +
@@ -43,7 +49,7 @@
 +                               uint32_t a3, uint32_t a4, uint32_t a5)
 +{
 +    int ret = ((boot_linux_fdt_fn)0x4BD330E9)(a0, a1, a2, a3, a4, a5);
-+    printf("M4 boot_linux_fdt returned to boot_linux ret=%d\n", ret);
++    printf("M4 boot_linux_fdt returned to boot_linux ret=%x\n", ret);
 +    return ret;
 +}
 +
@@ -74,6 +80,9 @@
 +        0x4BD332F8, 0x4BD33322, 0x4BD3335C, 0x4BD3338A,
 +        0x4BD333B8, 0x4BD333F0, 0x4BD3341E, 0x4BD335DE,
 +        0x4BD335FE, 0x4BD3394C,
++        /* 15th site: the fdt_setprop_u32 helper's internal call
++         * (covers linux,initrd-start/end and every other u32 fixup). */
++        0x4BD32F68,
 +    };
 +    static const uint16_t fdt_setprop_stock[][2] = {
 +        { 0xF007, 0xFFC3 }, { 0xF007, 0xFF82 },
@@ -83,6 +92,7 @@
 +        { 0xF007, 0xFEEA }, { 0xF007, 0xFECE },
 +        { 0xF007, 0xFEB7 }, { 0xF007, 0xFDD7 },
 +        { 0xF007, 0xFDC7 }, { 0xF007, 0xFC20 },
++        { 0xF008, 0xF912 },
 +    };
 +
 +    for (unsigned i = 0; i < sizeof(fdt_setprop_calls) / sizeof(fdt_setprop_calls[0]); i++) {
@@ -115,7 +125,7 @@
  }
  
  void set_led_ring(uint8_t colors[12][3]) {
-@@ -220,7 +309,7 @@
+@@ -220,7 +319,7 @@
      uint32_t *patch32;
  
      printf("This is LK-payload by xyz. Copyright 2019\n");
@@ -124,7 +134,7 @@
  
      parse_gpt();
  
-@@ -342,12 +431,12 @@
+@@ -342,12 +441,12 @@
      patch32 = (void*)&dev->read;
      *patch32 = (uint32_t)read_func;
  
@@ -140,7 +150,7 @@
          uint32_t **boot_arg_ptr = (void *)0x4BD664E0;
          uint32_t *boot_arg = *boot_arg_ptr;
  
-@@ -357,14 +446,19 @@
+@@ -357,14 +456,19 @@
          }
  
          patch32 = (void*)0x4BD641F4;

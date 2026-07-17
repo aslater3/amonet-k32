@@ -16,7 +16,27 @@ MKIMG_SIZE = 0x200
 ZIMAGE_END = 0x578910
 EVT_OFFSET = 0x585185
 EVT_SIZE = 0xC875
-NEW_PAYLOAD_SIZE = 0x585185
+# LK memcpy()s the appended DTB verbatim to tags_addr, so the blob's own
+# totalsize is the only working space libfdt gets. Stock blobs are packed
+# tight (slack 0), so creating /chosen/linux,initrd-* fails with NOSPACE.
+# Inflate totalsize and zero-pad so the pass-2 copy has room to grow.
+EVT_PADDED_SIZE = 0x10000
+NEW_PAYLOAD_SIZE = ZIMAGE_END + EVT_PADDED_SIZE
+# /chosen/linux,initrd-start|end (stock blobs ship with zero FDT slack, so
+# property creation dies with FDT_ERR_NOSPACE). Inflate totalsize and zero-pad
+# the stored blob so libfdt has room to grow after the verbatim copy.
+EVT_PADDED_SIZE = 0x10000
+NEW_PAYLOAD_SIZE = ZIMAGE_END + EVT_PADDED_SIZE
+# blob is the only source of libfdt working room.  The stock blobs are packed
+# tight (slack=0), which makes the /chosen linux,initrd-* property creation
+# fail with FDT_ERR_NOSPACE.  Inflate totalsize and zero-pad the stored blob.
+EVT_PADDED_SIZE = 0x10000
+NEW_PAYLOAD_SIZE = ZIMAGE_END + EVT_PADDED_SIZE
+EVT_SHA256 = "f44630ba28f503dd7503bc7cffa2ee96a319acf2f58f1456bb6f5ff23d57dee1"
+# The raw blob has zero internal slack, so inflate totalsize and zero-pad
+# to give libfdt room to grow the struct/strings blocks.
+EVT_PADDED_SIZE = 0x10000
+NEW_PAYLOAD_SIZE = ZIMAGE_END + EVT_PADDED_SIZE
 EVT_SHA256 = "f44630ba28f503dd7503bc7cffa2ee96a319acf2f58f1456bb6f5ff23d57dee1"
 
 
@@ -75,7 +95,11 @@ def build(source: Path, output: Path) -> None:
     if struct.unpack_from(">I", evt, 4)[0] != EVT_SIZE:
         raise SystemExit("ERROR: EVT FDT totalsize mismatch")
 
-    new_payload = payload[:ZIMAGE_END] + evt
+    evt_padded = bytearray(EVT_PADDED_SIZE)
+    evt_padded[:EVT_SIZE] = evt
+    struct.pack_into(">I", evt_padded, 4, EVT_PADDED_SIZE)
+
+    new_payload = payload[:ZIMAGE_END] + bytes(evt_padded)
     if len(new_payload) != NEW_PAYLOAD_SIZE:
         raise SystemExit(f"ERROR: diagnostic payload size is 0x{len(new_payload):x}")
     if new_payload.find(bytes.fromhex("d00dfeed")) != ZIMAGE_END:
@@ -107,7 +131,7 @@ def build(source: Path, output: Path) -> None:
 
     print(f"native_k32_boot={output}")
     print(f"kernel_addr=0x{kernel_addr:08x} kernel_size=0x{len(new_kernel):x}")
-    print(f"zimage_size=0x{ZIMAGE_END:x} evt_offset=0x{ZIMAGE_END:x} evt_size=0x{EVT_SIZE:x}")
+    print(f"zimage_size=0x{ZIMAGE_END:x} evt_offset=0x{ZIMAGE_END:x} evt_size=0x{EVT_PADDED_SIZE:x} evt_raw_size=0x{EVT_SIZE:x}")
     print(f"evt_sha256={EVT_SHA256}")
     print(f"image_sha256={hashlib.sha256(result).hexdigest()}")
 

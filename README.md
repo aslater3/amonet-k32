@@ -22,9 +22,9 @@ header-declared end at `0x578910`, followed by only the EVT DTB:
 ```text
 zImage:       original payload[0:0x578910]
 EVT source:   original payload[0x585185:0x5919FA]
-EVT size:     0xC875
-new payload:  0x585185
-new kernel:   0x585385 (includes the 0x200 MediaTek header)
+EVT raw size: 0xC875 (totalsize inflated to 0x10000, zero-padded)
+new payload:  0x588910
+new kernel:   0x588B10 (includes the 0x200 MediaTek header)
 ```
 
 EVT SHA-256:
@@ -34,12 +34,18 @@ The stock ramdisk and Android boot parameters are preserved.
 ## Runtime diagnostics
 
 The wrapper validates the exact stock instructions before installing hooks.
-It wraps all 14 direct `fdt_setprop` calls in the exact v184
-`boot_linux_fdt()` and prints:
+It wraps all 15 `fdt_setprop` call sites used by the exact v184
+`boot_linux_fdt()` — the 14 direct calls plus the internal call inside the
+`fdt_setprop_u32` helper at `0x4BD32F40` (which writes `linux,initrd-start`
+and `linux,initrd-end`) — and prints:
 
 ```text
-FDT setprop name=<property> ret=<signed return> len=<length>
+FDT setprop name=<property> ret=<ret,hex> len=<hex> fdt=<fdt pointer> node=<node offset>
+FDT magic=<first u32 at fdt> total=<fdt_totalsize, host order>
 ```
+
+(The payload mini-printf has no `%d`; signed returns print as two's-complement
+hex, e.g. FDT_ERR_BADOFFSET -4 shows as `fffffffc`.)
 
 This provides the useful M1/M2 information at property granularity without
 guessing stripped helper boundaries. Two exact control-flow checkpoints are
@@ -47,7 +53,7 @@ also installed:
 
 ```text
 M3 boot_linux_fdt common error epilogue reached
-M4 boot_linux_fdt returned to boot_linux ret=<value>
+M4 boot_linux_fdt returned to boot_linux ret=<hex>
 ```
 
 If Linux entry succeeds, M3/M4 do not execute. If both appear, the watchdog is
@@ -68,9 +74,35 @@ source (`lk-payload/`), BROM injector source (`brom-payload/` and `modules/`),
 exact firmware inputs, generated artifacts, deployment scripts and the
 superseded experiments under `obsolete/`.
 
+## Root cause found (2026-07-17) and fix
+
+The first run with property-level hooks showed:
+
+```text
+FDT setprop name=reg ret=0 len=10 fdt=48000000 node=b324
+M3 boot_linux_fdt common error epilogue reached
+M4 boot_linux_fdt returned to boot_linux ret=0
+```
+
+The in-place `/memory@00000000` `reg` rewrite succeeds, then execution
+diverges to the error epilogue before the next hooked call. Static
+disassembly of the window showed the failing operation: `fdt_setprop_u32`
+of `linux,initrd-start`/`linux,initrd-end` on `/chosen`. Those properties do
+not exist in the appended DTB, so libfdt must create them — but LK copies
+the appended DTB to `tags_addr` with a verbatim `memcpy` of exactly
+`fdt_totalsize` bytes, and the blob is packed tight (zero internal slack),
+so the creation fails with `FDT_ERR_NOSPACE` and `boot_linux_fdt()` returns
+without ever reaching the ARM32 kernel-jump stub at `0x4BD33BCA`.
+
+Fix: the builder inflates the appended EVT blob's `fdt_totalsize` to
+`0x10000` and zero-pads the stored blob to match, giving libfdt room for all
+runtime fixups. The raw DTB content (first `0xC875` bytes, SHA pinned) is
+unchanged; `hw_code` stays at offset `0x24`.
+
 ## Artifacts
 
-- `bin/boot-k32-native-evt.img` — 16 MiB ARM32 boot image, sole EVT DTB.
+- `bin/boot-k32-native-evt.img` — 16 MiB ARM32 boot image, sole EVT DTB with
+  `fdt_totalsize` inflated to `0x10000` (zero-padded) for libfdt fixup slack.
 - `bin/boot-k32-native-diag.hdr` — Amonet BROM wrapper header.
 - `bin/boot-k32-native-diag.payload` — injected payload section.
 - `bin/boot-k32-native-diag-wrapper.full.img` — 110 MiB logical wrapper.
