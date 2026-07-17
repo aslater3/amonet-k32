@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*.log
+
+# Reproducible compiler outputs; intentional release artifacts live in bin/.
+lk-payload/build/
+brom-payload/build/*.o
+brom-payload/build/*.elf
+
+# Kernel-module scratch outputs copied with the local bring-up tools.
+modules/**/*.o
+modules/**/*.mod
+modules/**/*.mod.c
+modules/**/*.order
+modules/**/*.symvers

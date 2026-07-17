@@ -1,0 +1,11 @@
+obj-m := enable_consys_clk.o
+
+KDIR ?= $(HOME)/workspace/kernel_amazon_mt8163
+ARCH ?= arm64
+CROSS_COMPILE ?= $(HOME)/android-ndk-r10e/toolchains/aarch64-linux-android-4.9/prebuilt/linux-x86_64/bin/aarch64-linux-android-
+
+all:
+	make -C $(KDIR) M=$(PWD) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) modules
+
+clean:
+	make -C $(KDIR) M=$(PWD) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) clean

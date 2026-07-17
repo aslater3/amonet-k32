@@ -1,0 +1,17 @@
+LOCAL_PATH := $(call my-dir)
+
+include $(CLEAR_VARS)
+LOCAL_MODULE := libamznbcb
+LOCAL_MODULE_TAGS := optional
+LOCAL_SRC_FILES := lib/bcblib.c
+LOCAL_C_INCLUDES := $(LOCAL_PATH)/lib
+LOCAL_EXPORT_C_INCLUDE_DIRS := $(LOCAL_PATH)/lib
+include $(BUILD_STATIC_LIBRARY)
+
+include $(CLEAR_VARS)
+LOCAL_MODULE := amzn_bcbtool
+LOCAL_SRC_FILES := bcbtool.c
+LOCAL_STATIC_LIBRARIES := libc libamznbcb
+LOCAL_MODULE_PATH := $(TARGET_RECOVERY_ROOT_OUT)/sbin
+LOCAL_FORCE_STATIC_EXECUTABLE := true
+include $(BUILD_EXECUTABLE)

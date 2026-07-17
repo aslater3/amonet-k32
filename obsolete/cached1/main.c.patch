@@ -1,0 +1,48 @@
+--- a/lk-payload/main.c
++++ b/lk-payload/main.c
+@@ -220,7 +220,7 @@
+     uint32_t *patch32;
+ 
+     printf("This is LK-payload by xyz. Copyright 2019\n");
+-    printf("64-Bit version for biscuit by k4y0z and R0rt1z2. Copyright 2020-2025\n");
++    printf("Biscuit post-payload ARM32 handoff by k4y0z and R0rt1z2. Copyright 2020-2025\n");
+ 
+     parse_gpt();
+ 
+@@ -357,14 +357,30 @@
+         }
+ 
+         patch32 = (void*)0x4BD641F4;
+-        *patch32 = 1; // diag: force K64 FDT path, final branch overrides to K32 jump
++        *patch32 = 1; // retain the proven K64 FDT preparation path
+ 
+-        // Remove is_64? 1 : 0 temporarily
+-        uint16_t *patch16 = (void*)0x4BD33908;
+-        *patch16 = 0xBA60;
++        /*
++         * The final handoff in this LK is:
++         *
++         *   4BD33704  cmp   r0, #0
++         *   4BD33706  beq.w 4BD33BCA     (ARM32: r0=0, r1=machid, r2=tags/FDT)
++         *   4BD3370A  ...                 (ARM64 helper)
++         *
++         * LK's partition image has a 0x200-byte MediaTek header which the
++         * preloader skips.  Patch the runtime CMP to MOVS r0,#0.  MOVS both
++         * supplies the ARM32-required r0 value and sets Z, so the original
++         * BEQ.W takes LK's native ARM32 epilogue without rewriting the branch.
++         */
++        volatile uint16_t *selector = (void*)0x4BD33704;
++        if (selector[0] != 0x2800 || selector[1] != 0xF000 || selector[2] != 0x8260) {
++            printf("ABI handoff failed: selector/branch=%04x %04x %04x\n",
++                   selector[0], selector[1], selector[2]);
++            while (1) {}
++        }
++        selector[0] = 0x2000;
+ 
+-        printf("ABI diag: cached_is_64=1 (K64 FDT path), branch forced K32@0x4BD33DCA bootopt=%u cached=%u\n",
+-               boot_arg[0x53], *patch32);
++        printf("ABI handoff: K64 FDT prep + ARM32 jump r0=0 target=0x4BD33BCA bootopt=%u cached=%u opcode=%04x %04x %04x\n",
++               boot_arg[0x53], *patch32, selector[0], selector[1], selector[2]);
+     } else {
+         printf("ABI handoff failed: inner boot header missing\n");
+         while (1) {}

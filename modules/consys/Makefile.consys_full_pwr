@@ -1,0 +1,1 @@
+obj-m := consys_full_pwr.o
