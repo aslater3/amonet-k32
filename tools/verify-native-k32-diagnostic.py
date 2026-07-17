@@ -13,7 +13,7 @@ LK_BASE = 0x4BD00000
 LK_HEADER_SIZE = 0x200
 PAYLOAD_BLOCK = 223215
 RAW_PAYLOAD_OFFSET = 576
-RAW_PAYLOAD_SIZE = 0x17A4
+RAW_PAYLOAD_SIZE = 0x17D8
 ZIMAGE_END = 0x578910
 EVT_SIZE = 0xC875
 EVT_PADDED_SIZE = 0x10000  # totalsize inflated + zero-padded: libfdt needs slack for fixups
@@ -21,13 +21,23 @@ EVT_SHA256 = "f44630ba28f503dd7503bc7cffa2ee96a319acf2f58f1456bb6f5ff23d57dee1"
 
 EXPECTED = {
     "lk.bin": "5cb92494340417b1e5d18c3eaa34844dbcfec2cc8086451f087867cd06b15472",
-    "boot-k32-native-evt.img": "ceecf9d93f8f5a02c89525b0cd07044826046d0ee9766f0007e99e7db5ba896a",
+    "boot-k32-native-evt.img": "1fe75af0428a6fbd9566505bb084af23e7e00c16c11ed0c6e19a95349c2e22c1",
     "boot-k32-native-diag.hdr": "dbbff7eeb8830c0d6cde454a97dc31be73d1cba32e6be9b21fe3c7be2b659066",
-    "boot-k32-native-diag.payload": "e8b4a3d47b618bd2b118827b3121e2af3702f308b7d751c37d04153428dc599a",
-    "boot-k32-native-diag-wrapper.full.img": "6d989015b4da2170cef56ddfe0d64d1a5e693400e78e1b4d320b370d1bc2e0d2",
-    "boot-k32-native-diag-wrapper.sparse.img": "abea61ed6c2e77befcb36a6698384b4a1769fcf37919f0d465853125c7285fb6",
+    "boot-k32-native-diag.payload": "d6d4f2900e342901bf9100380c5f7da9c3b838d68677ebf540dbd952ac5366b1",
+    "boot-k32-native-diag-wrapper.full.img": "0457cfa302ac52830c441b9704d22f8e14bc8c27dbf0a1eff274c9f139a082cb",
+    "boot-k32-native-diag-wrapper.sparse.img": "acef9a7095c6dfc06e487b0a6afcacb54593e03c351ac2720da28eeba19eba44",
 }
-RAW_PAYLOAD_SHA256 = "a700a1e898b1b35545e6575580d0ca8641c1f7c8fc9cf12962dcc584ff0d97bd"
+RAW_PAYLOAD_SHA256 = "5b596dc5f17c72f6fba6effbf90ed517d0778c2a80d77208a77d5d04b90ce6ea"
+
+# Assembled by tools/build-native-k32-diagnostic.py (arm-none-eabi-as
+# -march=armv7-a). Replaces the stock 8-NOP sled at the zImage entry; writes
+# 'K' to the UART, clobbers only r3/r12, then falls into the stock branch.
+#   movw r3,#0x2014 / movt r3,#0x1100 / ldr r12,[r3] / tst r12,#0x20
+#   beq -8 / sub r3,r3,#0x14 / mov r12,#'K' / str r12,[r3]
+ENTRY_PROBE = bytes.fromhex(
+    "143002e3" "003141e3" "00c093e5" "20001ce3"
+    "fcffff0a" "143043e2" "4bc0a0e3" "00c083e5")
+ENTRY_BRANCH = struct.pack("<I", 0xEA000003)
 
 FDT_CALLS = {
     0x4BD33206: (0xF007, 0xFFC3),
@@ -120,6 +130,8 @@ def verify_boot_image(image: bytes) -> None:
     payload_size = struct.unpack_from("<I", kernel, 4)[0]
     require(payload_size == 0x588910, "MediaTek payload size mismatch")
     payload = kernel[0x200:0x200 + payload_size]
+    require(payload[:0x20] == ENTRY_PROBE, "zImage entry probe mismatch")
+    require(payload[0x20:0x24] == ENTRY_BRANCH, "zImage entry branch clobbered")
     require(payload[0x24:0x28] == bytes.fromhex("18286f01"), "ARM zImage magic missing")
     require(struct.unpack_from("<II", payload, 0x28) == (0, ZIMAGE_END), "ARM zImage range changed")
     evt = payload[ZIMAGE_END:]
@@ -197,9 +209,11 @@ def main() -> None:
         b"M4 boot_linux_fdt args a0=%x a1=%x a2=%x a3=%x a4=%x a5=%x",
         b"M4 boot_linux_fdt returned to boot_linux ret=%x",
         b"K32J r0=%x machid=%x r2=%x fp=%x sp=%x",
+        b"K32J cpu cpsr=%08x mode=%x sctlr=%08x vbar=%08x",
         b"K32J zimg %x %x %x %x magic24=%x",
         b"K32J fdt magic=%x total=%x",
         b"K32J initrd %x-%x head %x %x %x %x",
+        b"block_off=%08x%08x",
     ):
         require(marker in raw_payload, f"compiled payload marker missing: {marker!r}")
     require(b"K64 FDT prep" not in raw_payload, "obsolete cached=1 marker remains")
@@ -231,7 +245,8 @@ def main() -> None:
     print("native_k32_handoff_contract=PASS r0=0 r1=machid r2=fdt target=0x4BD33BCA")
     print("evt_only_boot_contract=PASS zimage=0x578910 evt_raw=0xC875 evt_padded=0x10000 kernel=0x588B10")
     print("fdt_diagnostic_contract=PASS setprop_calls=15 M3=0x4BD33888 M4=0x4BD33DC0")
-    print("k32_jump_contract=PASS stub=0x4BD33BCA stock=990c:4632 log=regs+zimg+fdt+initrd")
+    print("k32_jump_contract=PASS stub=0x4BD33BCA stock=990c:4632 log=regs+cpu+zimg+fdt+initrd")
+    print("zimage_probe_contract=PASS entry=0x40008000 marker=K clobbers=r3,r12")
     print("wrapper_sparse_contract=PASS block=223215 logical=110MiB")
 
 

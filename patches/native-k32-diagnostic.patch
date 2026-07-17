@@ -1,6 +1,6 @@
 --- a/lk-payload/main.c
 +++ b/lk-payload/main.c
-@@ -25,17 +25,181 @@
+@@ -25,17 +25,204 @@
  uint64_t g_boot_a, g_boot_a_x, g_boot_b, g_boot_b_x, g_lk_a, g_lk_b, g_expdb, g_misc, g_recovery;
  uint8_t boot_recovery = 0;
  
@@ -14,13 +14,7 @@
 +
 +static int diag_fdt_setprop(void *fdt, int node, const char *name,
 +                            const void *value, int len)
- {
--    for (int i = 0; i < (512 - 0x16); i++) {
--        if (strncmp((char *)&bootopt_str[i], "bootopt=", sizeof("bootopt=") - 1) == 0) {
--            if (strncmp((char *)&bootopt_str[i + 0x12], "64", sizeof("64") - 1) == 0)
--                return 1;
--            if (strncmp((char *)&bootopt_str[i + 0x12], "32", sizeof("32") - 1) == 0)
--                return 0;
++{
 +    int ret = ((fdt_setprop_fn)0x4BD3B191)(fdt, node, name, value, len);
 +    /* mini-printf has no %d: signed values go out as %x (two's complement). */
 +    printf("FDT setprop name=%s ret=%x len=%x fdt=%x node=%x\n",
@@ -37,9 +31,8 @@
 +        } else if (strncmp(name, "linux,initrd-end", 16) == 0) {
 +            g_initrd_end = val;
 +            printf("FDT initrd-end val=%x\n", val);
-         }
-     }
--    return 0;
++        }
++    }
 +    return ret;
 +}
 +
@@ -72,6 +65,25 @@
 +
 +/* Runs with the full boot_linux_fdt register frame saved on the stack:
 + * frame[0]=r0 frame[6]=r6 frame[11]=fp; orig_sp is the pre-push SP. */
++static inline uint32_t read_cpsr(void)
++{
++    uint32_t v;
++    __asm__ volatile("mrs %0, cpsr" : "=r"(v));
++    return v;
++}
++static inline uint32_t read_sctlr(void)
++{
++    uint32_t v;
++    __asm__ volatile("mrc p15, 0, %0, c1, c0, 0" : "=r"(v));
++    return v;
++}
++static inline uint32_t read_vbar(void)
++{
++    uint32_t v;
++    __asm__ volatile("mrc p15, 0, %0, c12, c0, 0" : "=r"(v));
++    return v;
++}
++
 +__attribute__((used, noinline)) static void diag_k32_jump_log(const uint32_t *frame,
 +                                                              uint32_t orig_sp)
 +{
@@ -79,6 +91,7 @@
 +    uint32_t r6 = frame[6];
 +    uint32_t fp = frame[11];
 +    uint32_t machid = *(volatile uint32_t *)(orig_sp + 0x30);
++    uint32_t cpsr = read_cpsr();
 +    const volatile uint32_t *zimg = (const volatile uint32_t *)fp;
 +    const volatile uint32_t *fdt = (const volatile uint32_t *)r6;
 +    const volatile uint8_t *rd = (const volatile uint8_t *)g_initrd_start;
@@ -87,6 +100,9 @@
 +    low_uart_put('J');
 +    printf("K32J r0=%x machid=%x r2=%x fp=%x sp=%x\n",
 +           r0, machid, r6, fp, orig_sp);
++    /* mode: 0x13=SVC 0x1a=HYP; sctlr bit0=MMU bit1=align bit2=D$ bit12=I$. */
++    printf("K32J cpu cpsr=%08x mode=%x sctlr=%08x vbar=%08x\n",
++           cpsr, cpsr & 0x1f, read_sctlr(), read_vbar());
 +    printf("K32J zimg %x %x %x %x magic24=%x\n",
 +           zimg[0], zimg[1], zimg[2], zimg[3], zimg[9]);
 +    printf("K32J fdt magic=%x total=%x\n",
@@ -96,7 +112,13 @@
 +}
 +
 +__attribute__((naked)) static void diag_k32_jump_trampoline(void)
-+{
+ {
+-    for (int i = 0; i < (512 - 0x16); i++) {
+-        if (strncmp((char *)&bootopt_str[i], "bootopt=", sizeof("bootopt=") - 1) == 0) {
+-            if (strncmp((char *)&bootopt_str[i + 0x12], "64", sizeof("64") - 1) == 0)
+-                return 1;
+-            if (strncmp((char *)&bootopt_str[i + 0x12], "32", sizeof("32") - 1) == 0)
+-                return 0;
 +    __asm__ volatile(
 +        "push {r0-r12, lr}\n"     /* 14 regs: keeps SP 8-byte aligned */
 +        "mov r0, sp\n"
@@ -159,7 +181,7 @@
 +            printf("FDT hook mismatch at %08x: %04x %04x\n",
 +                   fdt_setprop_calls[i], call[0], call[1]);
 +            while (1) {}
-+        }
+         }
 +        patch_thumb_bl(fdt_setprop_calls[i], (uint32_t)diag_fdt_setprop);
 +    }
 +
@@ -176,7 +198,8 @@
 +    if (m4[0] != 0xF7FF || m4[1] != 0xF992) {
 +        printf("M4 hook mismatch: %04x %04x\n", m4[0], m4[1]);
 +        while (1) {}
-+    }
+     }
+-    return 0;
 +    patch_thumb_bl(0x4BD33DC0, (uint32_t)diag_boot_linux_fdt);
 +
 +    /* K32 jump stub: ldr r1,[sp,#48]; mov r2,r6; blx fp.  Log the final
@@ -190,7 +213,21 @@
  }
  
  void set_led_ring(uint8_t colors[12][3]) {
-@@ -220,7 +384,7 @@
+@@ -79,8 +266,11 @@
+ 
+ int read_func(struct device_t *dev, uint64_t block_off, void *dst, size_t sz, int part) {
+     printf("read_func hook\n");
+-    printf("block_off 0x%08X 0x%08X\n", block_off, *(&(block_off)+4));
+-    printf("dev 0x%08X dst 0x%08X sz 0x%08X part 0x%08X\n", dev, dst, sz, part);
++    /* block_off is uint64_t: print explicit halves (varargs are 32-bit). */
++    printf("block_off=%08x%08x\n",
++           (uint32_t)(block_off >> 32), (uint32_t)block_off);
++    printf("dev=%08x dst=%08x sz=%08x part=%08x\n",
++           (uint32_t)dev, (uint32_t)dst, (uint32_t)sz, (uint32_t)part);
+ 
+     int ret = 0;
+ 
+@@ -220,7 +410,7 @@
      uint32_t *patch32;
  
      printf("This is LK-payload by xyz. Copyright 2019\n");
@@ -199,7 +236,7 @@
  
      parse_gpt();
  
-@@ -342,12 +506,12 @@
+@@ -342,12 +532,12 @@
      patch32 = (void*)&dev->read;
      *patch32 = (uint32_t)read_func;
  
@@ -215,7 +252,7 @@
          uint32_t **boot_arg_ptr = (void *)0x4BD664E0;
          uint32_t *boot_arg = *boot_arg_ptr;
  
-@@ -357,14 +521,19 @@
+@@ -357,14 +547,19 @@
          }
  
          patch32 = (void*)0x4BD641F4;

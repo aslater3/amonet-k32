@@ -86,8 +86,9 @@ emits a raw UART `J` marker, then logs the exact kernel-consumed state:
 
 ```text
 K32J r0=<hex> machid=<hex> r2=<fdt> fp=<kernel entry> sp=<hex>
+K32J cpu cpsr=<hex> mode=<0x13=SVC 0x1a=HYP> sctlr=<bit0=MMU bit2=D$ bit12=I$> vbar=<hex>
 K32J zimg <first 4 words at fp> magic24=<word at fp+0x24, expect 16f2818>
-K32J fdt magic=<edfe0dd0> total=<10000>
+K32J fdt magic=<edfe0dd0> total=<packed totalsize, <=0x10000; 0xdd92 observed>
 K32J initrd <start>-<end> head <first 4 bytes at initrd-start>
 ```
 
@@ -95,6 +96,25 @@ The initrd head bytes answer whether the ramdisk is physically present where
 `/chosen/linux,initrd-start` points (gzip ramdisks start `1f 8b`). After
 logging, the trampoline restores the full register frame and performs the
 stock `blx fp` handoff unchanged.
+
+The final FDT `total=` is **not** `0x10000`: `0x10000` is only the writable
+capacity supplied so libfdt can create `/chosen/linux,initrd-*`. Before the
+handoff LK calls `fdt_pack()`, which compacts the tree and rewrites
+`totalsize` to the actual packed length (`0xdd92` for this build). Any valid
+packed size no greater than `0x10000` with magic `edfe0dd0` is expected.
+
+In addition, the EVT boot image's zImage entry NOP sled (offsets `0x00-0x1f`)
+is replaced by an 8-instruction ARM UART probe (assembled with
+`arm-none-eabi-as -march=armv7-a` at build time, never hand-encoded). It
+polls UART LSR `0x11002014` and writes `K` to THR `0x11002000`, clobbering
+only `r3`/`r12` (unspecified at kernel entry) and preserving the ABI
+registers `r0`/`r1`/`r2`, then falls through to the untouched stock branch
+at `+0x20`. Interpretation:
+
+- `J...K32J...` but no `K` → the `blx` interworking, execution state, or the
+  first fetch at `0x40008000` failed (use the `K32J cpu` line to diagnose).
+- `K` appears but no kernel output follows → the CPU entered the zImage and
+  the failure is inside zImage startup, relocation, or decompression.
 
 This directory is its own Git repository and contains the patched Amonet
 source (`lk-payload/`), BROM injector source (`brom-payload/` and `modules/`),

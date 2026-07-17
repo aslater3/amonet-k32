@@ -85,6 +85,25 @@ static int diag_boot_linux_fdt(uint32_t a0, uint32_t a1, uint32_t a2,
 
 /* Runs with the full boot_linux_fdt register frame saved on the stack:
  * frame[0]=r0 frame[6]=r6 frame[11]=fp; orig_sp is the pre-push SP. */
+static inline uint32_t read_cpsr(void)
+{
+    uint32_t v;
+    __asm__ volatile("mrs %0, cpsr" : "=r"(v));
+    return v;
+}
+static inline uint32_t read_sctlr(void)
+{
+    uint32_t v;
+    __asm__ volatile("mrc p15, 0, %0, c1, c0, 0" : "=r"(v));
+    return v;
+}
+static inline uint32_t read_vbar(void)
+{
+    uint32_t v;
+    __asm__ volatile("mrc p15, 0, %0, c12, c0, 0" : "=r"(v));
+    return v;
+}
+
 __attribute__((used, noinline)) static void diag_k32_jump_log(const uint32_t *frame,
                                                               uint32_t orig_sp)
 {
@@ -92,6 +111,7 @@ __attribute__((used, noinline)) static void diag_k32_jump_log(const uint32_t *fr
     uint32_t r6 = frame[6];
     uint32_t fp = frame[11];
     uint32_t machid = *(volatile uint32_t *)(orig_sp + 0x30);
+    uint32_t cpsr = read_cpsr();
     const volatile uint32_t *zimg = (const volatile uint32_t *)fp;
     const volatile uint32_t *fdt = (const volatile uint32_t *)r6;
     const volatile uint8_t *rd = (const volatile uint8_t *)g_initrd_start;
@@ -100,6 +120,9 @@ __attribute__((used, noinline)) static void diag_k32_jump_log(const uint32_t *fr
     low_uart_put('J');
     printf("K32J r0=%x machid=%x r2=%x fp=%x sp=%x\n",
            r0, machid, r6, fp, orig_sp);
+    /* mode: 0x13=SVC 0x1a=HYP; sctlr bit0=MMU bit1=align bit2=D$ bit12=I$. */
+    printf("K32J cpu cpsr=%08x mode=%x sctlr=%08x vbar=%08x\n",
+           cpsr, cpsr & 0x1f, read_sctlr(), read_vbar());
     printf("K32J zimg %x %x %x %x magic24=%x\n",
            zimg[0], zimg[1], zimg[2], zimg[3], zimg[9]);
     printf("K32J fdt magic=%x total=%x\n",
@@ -243,8 +266,11 @@ void create_led_thread() {
 
 int read_func(struct device_t *dev, uint64_t block_off, void *dst, size_t sz, int part) {
     printf("read_func hook\n");
-    printf("block_off 0x%08X 0x%08X\n", block_off, *(&(block_off)+4));
-    printf("dev 0x%08X dst 0x%08X sz 0x%08X part 0x%08X\n", dev, dst, sz, part);
+    /* block_off is uint64_t: print explicit halves (varargs are 32-bit). */
+    printf("block_off=%08x%08x\n",
+           (uint32_t)(block_off >> 32), (uint32_t)block_off);
+    printf("dev=%08x dst=%08x sz=%08x part=%08x\n",
+           (uint32_t)dev, (uint32_t)dst, (uint32_t)sz, (uint32_t)part);
 
     int ret = 0;
 

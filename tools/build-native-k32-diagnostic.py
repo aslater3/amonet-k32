@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import struct
+import subprocess
+import tempfile
 from pathlib import Path
 
 
@@ -24,9 +26,55 @@ EVT_PADDED_SIZE = 0x10000
 NEW_PAYLOAD_SIZE = ZIMAGE_END + EVT_PADDED_SIZE
 EVT_SHA256 = "f44630ba28f503dd7503bc7cffa2ee96a319acf2f58f1456bb6f5ff23d57dee1"
 
+# The stock zImage starts with eight ARM NOPs (0x00-0x1f), then the entry
+# branch at 0x20 and the magic/start/end header fields. Replace exactly the
+# NOP sled with an 8-instruction UART probe that writes 'K': if 'K' appears
+# on the serial log, the CPU fetched and executed code at 0x40008000, which
+# distinguishes an interworking/first-fetch failure from a fault later in
+# zImage startup. The probe clobbers only r3/r12 (unspecified at kernel
+# entry) and preserves the ABI registers r0/r1/r2. It is assembled with the
+# same toolchain as the LK payload -- never hand-encoded.
+ARM_NOP = struct.pack("<I", 0xE1A00000)
+ENTRY_BRANCH = 0xEA000003
+ENTRY_PROBE_ASM = """\
+    .syntax unified
+    .arm
+    .text
+    .global _start
+_start:
+    movw    r3, #0x2014
+    movt    r3, #0x1100      @ r3 = UART LSR (0x11002014)
+1:  ldr     r12, [r3]
+    tst     r12, #0x20
+    beq     1b
+    sub     r3, r3, #0x14    @ r3 = UART THR (0x11002000)
+    mov     r12, #'K'
+    str     r12, [r3]
+"""
+
 
 def align(value: int, alignment: int) -> int:
     return (value + alignment - 1) & ~(alignment - 1)
+
+
+def assemble_entry_probe() -> bytes:
+    with tempfile.TemporaryDirectory() as td:
+        src = Path(td) / "probe.s"
+        obj = Path(td) / "probe.o"
+        raw = Path(td) / "probe.bin"
+        src.write_text(ENTRY_PROBE_ASM)
+        subprocess.run(
+            ["arm-none-eabi-as", "-march=armv7-a", "-o", str(obj), str(src)],
+            check=True)
+        subprocess.run(
+            ["arm-none-eabi-objcopy", "-O", "binary", "-j", ".text",
+             str(obj), str(raw)],
+            check=True)
+        blob = raw.read_bytes()
+    if len(blob) != 0x20:
+        raise SystemExit(
+            f"ERROR: entry probe is 0x{len(blob):x} bytes, expected 0x20")
+    return blob
 
 
 def android_id(kernel: bytes, ramdisk: bytes, second: bytes, dt: bytes) -> bytes:
@@ -65,11 +113,23 @@ def build(source: Path, output: Path) -> None:
         raise SystemExit("ERROR: stock kernel MediaTek header missing")
     payload_size = struct.unpack_from("<I", kernel, 4)[0]
     payload = kernel[MKIMG_SIZE:MKIMG_SIZE + payload_size]
+
+    # Entry probe: assert the stock NOP sled and entry header, then replace
+    # exactly the sled (0x00-0x1f). The branch at 0x20 and every header
+    # field from 0x24 onward must survive untouched.
+    if payload[:0x20] != ARM_NOP * 8:
+        raise SystemExit("ERROR: zImage entry NOP sled contract failed")
+    if struct.unpack_from("<I", payload, 0x20)[0] != ENTRY_BRANCH:
+        raise SystemExit("ERROR: zImage entry branch contract failed")
+    probe = assemble_entry_probe()
+    payload = probe + payload[0x20:]
     if payload[0x24:0x28] != ZIMAGE_MAGIC:
         raise SystemExit("ERROR: ARM zImage magic missing")
     start, end = struct.unpack_from("<II", payload, 0x28)
     if (start, end) != (0, ZIMAGE_END):
         raise SystemExit(f"ERROR: unexpected zImage range: 0x{start:x}-0x{end:x}")
+    if struct.unpack_from("<I", payload, 0x20)[0] != ENTRY_BRANCH:
+        raise SystemExit("ERROR: entry probe clobbered the zImage branch")
 
     evt = payload[EVT_OFFSET:EVT_OFFSET + EVT_SIZE]
     evt_hash = hashlib.sha256(evt).hexdigest()
@@ -116,6 +176,7 @@ def build(source: Path, output: Path) -> None:
 
     print(f"native_k32_boot={output}")
     print(f"kernel_addr=0x{kernel_addr:08x} kernel_size=0x{len(new_kernel):x}")
+    print("zimage_probe=" + " ".join(f"{w:08x}" for w in struct.unpack("<8I", probe)))
     print(f"zimage_size=0x{ZIMAGE_END:x} evt_offset=0x{ZIMAGE_END:x} evt_size=0x{EVT_PADDED_SIZE:x} evt_raw_size=0x{EVT_SIZE:x}")
     print(f"evt_sha256={EVT_SHA256}")
     print(f"image_sha256={hashlib.sha256(result).hexdigest()}")
