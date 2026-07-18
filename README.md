@@ -116,20 +116,29 @@ at `+0x20`. Interpretation:
 - `K` appears but no kernel output follows → the CPU entered the zImage and
   the failure is inside zImage startup, relocation, or decompression.
 
-The builder also patches the stock decompressor return at zImage offset
-`0x924` (the unique `mov pc,r4`) to branch into the following six-word ARM NOP
-sled. Five sled words are replaced by a position-independent probe that writes
-`D` to `0x11002000` and executes `bx r4`; the final NOP remains as an overrun
-sentinel. This preserves the decompressed-kernel target in `r4` and separates
-an entry/cache/relocation failure from a failure after decompression:
+The builder also replaces the stock decompressor return at zImage offset
+`0x924` (the unique `mov pc,r4`) plus its following six-word ARM NOP sled with
+a seven-instruction position-independent trampoline. It writes `D`, carries the
+UART THR address and an `H` byte into the decompressed image, moves the displaced
+`mrs r9,cpsr` operation into the trampoline, and executes `bx r4`.
+
+Inside the gzip member, the builder changes only the first two decompressed
+kernel words: the first writes `H`; the second is the original
+`bl __hyp_stub_install` retargeted for its four-byte displacement. The kernel is
+recompressed into the exact original `0x5741fb`-byte envelope and any saved
+space is zero-padded, so the zImage end and EVT offset do not move. Interpretation:
 
 - `K` but no `D` → failure before the decompressor's final return, including
   cache/MMU setup, decompressor relocation, or gzip decompression.
-- `D` → the decompressor reached its return path and branched to the
-  uncompressed kernel entry; any remaining silence is after decompression.
+- `KD` but no `H` → the decompressor completed, but `bx r4` or the first fetch
+  from the decompressed kernel entry failed.
+- `KDH` → decompressed `head.S` executed; any later silence is within early ARM
+  kernel startup after the first instruction.
 
-The `D` probe is assembled at build time and the verifier checks the exact
-branch, five probe words, and trailing NOP sentinel.
+Both probes are assembled at build time. The verifier decompresses the final
+artifact, checks the exact two modified head words and untouched following
+words, and verifies the fixed-size gzip envelope and complete seven-word
+D-to-H trampoline.
 
 Before GPT parsing, the payload also inspects the retained MediaTek ATF crash
 control block at `0x5F800000`: indices 14, 15, and 16 provide the crash-buffer

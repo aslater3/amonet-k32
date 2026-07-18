@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import struct
+import zlib
 from pathlib import Path
 
 
@@ -18,10 +19,17 @@ ZIMAGE_END = 0x578910
 EVT_SIZE = 0xC875
 EVT_PADDED_SIZE = 0x10000  # totalsize inflated + zero-padded: libfdt needs slack for fixups
 EVT_SHA256 = "f44630ba28f503dd7503bc7cffa2ee96a319acf2f58f1456bb6f5ff23d57dee1"
+KERNEL_GZIP_OFFSET = 0x46D8
+KERNEL_GZIP_SIZE = 0x5741FB
+KERNEL_GZIP_PROBED_SIZE = 0x573D40
+DECOMPRESSED_KERNEL_SIZE = 0xB86070
+HEAD_ENTRY_PROBE = bytes.fromhex("00c083e5ed4700eb")
+STOCK_DECOMPRESSED_TAIL = bytes.fromhex("1a9029e21f0019e3")
+STOCK_DECOMPRESSED_SHA256 = "3eac3f3daf9daa04f1b67e78c3f2b1ead9a74d64aae435ef5f1988916d31cbd2"
 
 EXPECTED = {
     "lk.bin": "5cb92494340417b1e5d18c3eaa34844dbcfec2cc8086451f087867cd06b15472",
-    "boot-k32-native-evt.img": "b7764a69ca00a3c38b80c09dfc1e6d644fd3510771c378df6ac47c91dd08afc4",
+    "boot-k32-native-evt.img": "c119decd195e1f25525466e8ba82706b4e8276826b34fc9bcaf08b732a4addba",
     "boot-k32-native-diag.hdr": "dbbff7eeb8830c0d6cde454a97dc31be73d1cba32e6be9b21fe3c7be2b659066",
     "boot-k32-native-diag.payload": "e885a546af1f896a73ac34224abb98482509f59ae3d70eae2ac4ed0f264d6e74",
     "boot-k32-native-diag-wrapper.full.img": "0c264f23f0ba043ef316f170ffa9fdcf90ec0835b92af8adbf1891607985aa4d",
@@ -39,12 +47,11 @@ ENTRY_PROBE = bytes.fromhex(
     "fcffff0a" "143043e2" "4bc0a0e3" "00c083e5")
 ENTRY_BRANCH = struct.pack("<I", 0xEA000003)
 DEJUMP_OFF = 0x924
-DEJUMP_BRANCH = struct.pack("<I", 0xEAFFFFFF)
 DEJUMP_SLED_OFF = 0x928
 DEJUMP_SLED_SIZE = 6
-DEJUMP_NOP = struct.pack("<I", 0xE320F000)
 DEJUMP_PROBE = bytes.fromhex(
-    "003002e3" "003141e3" "44c0a0e3" "00c083e5" "14ff2fe1")
+    "003002e3" "003141e3" "44c0a0e3" "00c083e5"
+    "48c0a0e3" "00900fe1" "14ff2fe1")
 
 FDT_CALLS = {
     0x4BD33206: (0xF007, 0xFFC3),
@@ -145,13 +152,35 @@ def verify_boot_image(image: bytes) -> None:
     require(struct.unpack_from("<II", payload, 0x28) == (0, ZIMAGE_END), "ARM zImage range changed")
     require(payload[DEJUMP_OFF - 4:DEJUMP_OFF] == bytes.fromhex("0000a0e3"),
             "decompression pre-return instruction changed")
-    require(payload[DEJUMP_OFF:DEJUMP_OFF + 4] == DEJUMP_BRANCH,
-            "decompression return branch missing")
     sled_end = DEJUMP_SLED_OFF + DEJUMP_SLED_SIZE * 4
-    require(payload[DEJUMP_SLED_OFF:DEJUMP_SLED_OFF + len(DEJUMP_PROBE)] == DEJUMP_PROBE,
-            "decompression D probe mismatch")
-    require(payload[sled_end - 4:sled_end] == DEJUMP_NOP,
-            "decompression D probe sled overrun")
+    require(payload[DEJUMP_OFF:sled_end] == DEJUMP_PROBE,
+            "decompression D-to-H trampoline mismatch")
+
+    inflater = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    raw = inflater.decompress(payload[KERNEL_GZIP_OFFSET:ZIMAGE_END]) + inflater.flush()
+    consumed = (ZIMAGE_END - KERNEL_GZIP_OFFSET) - len(inflater.unused_data)
+    require(inflater.eof and consumed == KERNEL_GZIP_PROBED_SIZE,
+            "H-probed kernel gzip envelope mismatch")
+    require(len(raw) == DECOMPRESSED_KERNEL_SIZE,
+            "H-probed decompressed kernel size mismatch")
+    require(raw[:8] == HEAD_ENTRY_PROBE,
+            "decompressed head.S H probe mismatch")
+    require(raw[8:16] == STOCK_DECOMPRESSED_TAIL,
+            "decompressed head.S changed beyond the two probed words")
+    stock = (ROOT / "inputs/boot-v184-stock32-parity-stock.img").read_bytes()
+    stock_kernel_size = struct.unpack_from("<I", stock, 8)[0]
+    stock_zimage = stock[0x800 + 0x200:0x800 + stock_kernel_size]
+    stock_inflater = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    stock_raw = stock_inflater.decompress(
+        stock_zimage[KERNEL_GZIP_OFFSET:]) + stock_inflater.flush()
+    require(stock_inflater.eof and digest(stock_raw) == STOCK_DECOMPRESSED_SHA256,
+            "stock decompressed kernel contract changed")
+    require(raw[8:] == stock_raw[8:],
+            "H-probed decompressed kernel differs from stock beyond bytes 0..7")
+    gzip_pad_start = KERNEL_GZIP_OFFSET + consumed
+    gzip_pad_end = KERNEL_GZIP_OFFSET + KERNEL_GZIP_SIZE
+    require(payload[gzip_pad_start:gzip_pad_end] == b"\0" * (gzip_pad_end - gzip_pad_start),
+            "H-probed gzip envelope padding is not zero-filled")
     evt = payload[ZIMAGE_END:]
     require(len(evt) == EVT_PADDED_SIZE, "padded EVT DTB size mismatch")
     raw_evt = bytearray(evt[:EVT_SIZE])
@@ -277,7 +306,8 @@ def main() -> None:
     print("fdt_diagnostic_contract=PASS setprop_calls=15 M3=0x4BD33888 M4=0x4BD33DC0")
     print("k32_jump_contract=PASS stub=0x4BD33BCA stock=990c:4632 log=regs+cpu+zimg+fdt+initrd")
     print("zimage_probe_contract=PASS entry=0x40008000 marker=K clobbers=r3,r12")
-    print("zimage_dejump_contract=PASS return=0x924 marker=D target=r4")
+    print("zimage_dejump_contract=PASS return=0x924 markers=D,H target=r4")
+    print("kernel_head_probe_contract=PASS entry=0x40008000 marker=H gzip_fixed=0x5741FB")
     print("atf_crash_contract=PASS range=0x5F800000-0x5FA00000 max=0x20000")
     print("wrapper_sparse_contract=PASS block=223215 logical=110MiB")
 
