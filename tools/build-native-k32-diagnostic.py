@@ -101,6 +101,31 @@ HEAD_WRAPPER_STOCK = b"\0" * HEAD_WRAPPER_CAVE_SIZE
 HEAD_WRAPPER_MARKERS = "SPLVUTFCE"
 HEAD_MARKER_SEQUENCE = "HI" + HEAD_WRAPPER_MARKERS
 
+# Post-MMU redirects use the two previously-free slots in the same cave.  The
+# site values are decompressed-Image offsets from DECOMPRESSED_BASE; keeping
+# them as offsets makes the stock/candidate byte masking unambiguous.
+POST_MMU_PATCH_SITES = ((0xAA72E0, 0x1C0), (0xAA78B0, 0x200))
+POST_MMU_STOCK_WORDS = {
+    0xAA72E0: bytes.fromhex("40308fe2"),  # add r3,pc,#64 (__mmap_switched)
+    0xAA78B0: bytes.fromhex("f0432de9"),  # push {r4-r9,sl,fp,lr} (start_kernel)
+}
+POST_MMU_CAVE_ADDR = HEAD_WRAPPER_CAVE_ADDR + 0x80000000
+UART_PGD_INDEX = 0xC10
+UART_PGD_OFFSET = UART_PGD_INDEX * 4
+# PMD_TYPE_SECT | TEX(1) | S | AP[2:1]=11 (full access) | XN, with
+# section base 0x11000000.  TEX=1,C=0,B=0 is the Linux ARM device mapping.
+UART_DEVICE_SECTION = 0x11000000 | 0x1000 | 0x10000 | 0xC00 | 0x10 | 0x2
+POST_MMU_M_EXPECTED = bytes.fromhex(
+    "00c002e300c14ce34d30a0e300308ce5"
+    "00c00fe3dfc04ce30430cce54b3303e3"
+    "323045e300308ce54ff07ff53acf07ee"
+    "4ff07ff528330fe3aa304ce323e80cea")
+POST_MMU_W_EXPECTED = bytes.fromhex(
+    "00c002e300c14ce35700a0e300008ce5"
+    "00c00fe3dfc04ce30500cce54ff07ff5"
+    "3acf07ee4ff07ff5f0432de98be90cea"
+    "00000000000000000000000000000000")
+
 # kind:
 #   sp:   the stock msr at 0x30 has already completed; execute mrc and S/P
 #         markers in one cave, then resume at 0x38
@@ -124,11 +149,19 @@ _HEAD_WRAPPER_DEFS = (
     {"site": 0x0074, "offset": 0x180, "marker": "CE", "kind": "ce",
      "target": 0x400087C4, "stock": "d20100ea"},
 )
+_POST_MMU_WRAPPER_DEFS = (
+    {"site": 0xAA72E0, "offset": 0x1C0, "marker": "M", "kind": "post_mmu",
+     "stock": "40308fe2"},
+    {"site": 0xAA78B0, "offset": 0x200, "marker": "W", "kind": "post_mmu",
+     "stock": "f0432de9"},
+)
 HEAD_WRAPPER_PATCH_SITES = tuple(
-    (definition["site"], definition["offset"]) for definition in _HEAD_WRAPPER_DEFS
+    (definition["site"], definition["offset"])
+    for definition in (*_HEAD_WRAPPER_DEFS, *_POST_MMU_WRAPPER_DEFS)
 )
 _HEAD_WRAPPER_BY_SITE = {
-    definition["site"]: definition for definition in _HEAD_WRAPPER_DEFS
+    definition["site"]: definition
+    for definition in (*_HEAD_WRAPPER_DEFS, *_POST_MMU_WRAPPER_DEFS)
 }
 _HEAD_WRAPPER_CALL_SITES = {
     definition["site"] for definition in _HEAD_WRAPPER_DEFS
@@ -149,6 +182,8 @@ HEAD_WRAPPER_PATCH_EXPECTED = {
     0x005C: bytes.fromhex("3cb41deb"),
     0x0060: bytes.fromhex("4bb41deb"),
     0x0074: bytes.fromhex("56b41dea"),
+    0xAA72E0: bytes.fromhex("cb17f3ea"),
+    0xAA78B0: bytes.fromhex("6716f3ea"),
 }
 HEAD_WRAPPER_SLOT_EXPECTED = {
     0x000: bytes.fromhex(
@@ -168,10 +203,13 @@ HEAD_WRAPPER_SLOT_EXPECTED = {
         "0088bde8"),
     0x140: bytes.fromhex(
         "00482de9b94be2eb003002e3003141e354c0a0e300c083e5"
+        "403003e3033084e012cc01e300c141e300c083e5"
         "0088bde8"),
     0x180: bytes.fromhex(
         "003002e3003141e343c0a0e300c083e5"
         "003002e3003141e345c0a0e300c083e5724de2ea"),
+    0x1C0: POST_MMU_M_EXPECTED,
+    0x200: POST_MMU_W_EXPECTED,
 }
 
 
@@ -212,6 +250,12 @@ def _head_wrapper_asm() -> str:
                 "    push    {r11, lr}",
                 f"    bl      0x{definition['target']:08x}",
                 f"    EMIT    '{definition['marker']}'",
+                *(["    movw    r3, #0x3040",
+                   "    add     r3, r4, r3",
+                   "    movw    r12, #0x1c12",
+                   "    movt    r12, #0x1100",
+                   "    str     r12, [r3]"]
+                  if definition["marker"] == "T" else []),
                 "    pop     {r11, pc}",
             ])
         elif definition["kind"] == "ce":
@@ -224,6 +268,51 @@ def _head_wrapper_asm() -> str:
             raise AssertionError(f"unknown wrapper kind: {definition['kind']}")
     lines.append(f"    .org 0x{HEAD_WRAPPER_CAVE_SIZE:x}")
     return "\n".join(lines) + "\n"
+
+
+def _post_mmu_wrapper_asm() -> str:
+    """Return the two wrappers assembled for their post-MMU virtual VMA."""
+    return f"""\
+    .syntax unified
+    .arm
+    .text
+    .global _start
+    .equ M_SITE, 0x{DECOMPRESSED_BASE + 0xAA72E0 + 0x80000000:08x}
+    .equ W_SITE, 0x{DECOMPRESSED_BASE + 0xAA78B0 + 0x80000000:08x}
+    .org 0x1c0
+wrapper_M:
+    movw    r12, #0x2000
+    movt    r12, #0xc100
+    mov     r3, #'M'
+    str     r3, [r12]
+    movw    r12, #0xf000
+    movt    r12, #0xc0df
+    strb    r3, [r12, #4]
+    movw    r3, #0x334b
+    movt    r3, #0x5032
+    str     r3, [r12]
+    dsb     sy
+    mcr     p15, 0, r12, c7, c10, 1
+    dsb     sy
+    movw    r3, #0xf328
+    movt    r3, #0xc0aa
+    b       M_SITE + 4
+    .org 0x200
+wrapper_W:
+    movw    r12, #0x2000
+    movt    r12, #0xc100
+    mov     r0, #'W'
+    str     r0, [r12]
+    movw    r12, #0xf000
+    movt    r12, #0xc0df
+    strb    r0, [r12, #5]
+    dsb     sy
+    mcr     p15, 0, r12, c7, c10, 1
+    dsb     sy
+    .word   0xe92d43f0
+    b       W_SITE + 4
+    .org 0x240
+"""
 
 # The stock zImage starts with eight ARM NOPs (0x00-0x1f), then the entry
 # branch at 0x20 and the magic/start/end header fields. Replace exactly the
@@ -351,21 +440,36 @@ def assemble_head_trampoline() -> bytes:
 
 
 def assemble_head_wrappers() -> bytes:
-    blob = assemble_linked_probe(_head_wrapper_asm(), HEAD_WRAPPER_CAVE_ADDR,
-                                 HEAD_WRAPPER_CAVE_SIZE, "expanded head wrappers")
-    if blob != expected_head_wrappers():
+    blob = bytearray(assemble_linked_probe(
+        _head_wrapper_asm(), HEAD_WRAPPER_CAVE_ADDR, HEAD_WRAPPER_CAVE_SIZE,
+        "expanded pre-MMU head wrappers"))
+    post = assemble_linked_probe(
+        _post_mmu_wrapper_asm(), POST_MMU_CAVE_ADDR, HEAD_WRAPPER_CAVE_SIZE,
+        "expanded post-MMU wrappers")
+    for _, offset in POST_MMU_PATCH_SITES:
+        # The post-MMU source is linked at the virtual alias, but ARM B/BL
+        # encodings depend only on the source/target displacement and are
+        # therefore identical in the physical decompressed Image.
+        blob[offset:offset + HEAD_WRAPPER_SLOT_SIZE] = \
+            post[offset:offset + HEAD_WRAPPER_SLOT_SIZE]
+    result = bytes(blob)
+    if result != expected_head_wrappers():
         raise SystemExit("ERROR: expanded head wrapper encoding changed")
     for definition in _HEAD_WRAPPER_DEFS:
         if definition["kind"] != "call":
             continue
         offset = definition["offset"]
-        if blob[offset:offset + 4] != HEAD_WRAPPER_CALL_START:
+        if result[offset:offset + 4] != HEAD_WRAPPER_CALL_START:
             raise SystemExit(
                 f"ERROR: call wrapper at 0x{offset:x} lacks push {{r11, lr}}")
-        if blob[offset + 0x18:offset + 0x1C] != HEAD_WRAPPER_CALL_END:
+        end_offset = 0x2C if definition["marker"] == "T" else 0x18
+        if result[offset + end_offset:offset + end_offset + 4] != HEAD_WRAPPER_CALL_END:
             raise SystemExit(
                 f"ERROR: call wrapper at 0x{offset:x} lacks pop {{r11, pc}}")
-    return blob
+    if result[0x1C0:0x200] != POST_MMU_M_EXPECTED or \
+            result[0x200:0x240] != POST_MMU_W_EXPECTED:
+        raise SystemExit("ERROR: post-MMU wrapper slot encoding changed")
+    return result
 
 
 def head_wrapper_patch_word(site: int, wrapper_offset: int) -> bytes:

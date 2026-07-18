@@ -58,9 +58,9 @@ class HeadEntryProbeTest(unittest.TestCase):
     def test_expanded_wrapper_patch_sites_have_exact_control_flow(self):
         self.assertEqual(BUILDER.HEAD_MARKER_SEQUENCE, "HISPLVUTFCE")
         self.assertEqual(BUILDER.HEAD_WRAPPER_MARKERS, "SPLVUTFCE")
-        self.assertEqual(len(BUILDER.HEAD_WRAPPER_PATCH_SITES), 7)
+        self.assertEqual(len(BUILDER._HEAD_WRAPPER_DEFS), 7)
         self.assertEqual(
-            [site for site, _ in BUILDER.HEAD_WRAPPER_PATCH_SITES],
+            [definition["site"] for definition in BUILDER._HEAD_WRAPPER_DEFS],
             [
                 0x0034,  # S/P: post-SVC join, CPU ID read
                 0x0038,  # L: __lookup_processor_type returned
@@ -92,9 +92,11 @@ class HeadEntryProbeTest(unittest.TestCase):
         self.assertIn("movw    r3, #0x2000", asm)
         self.assertIn("movt    r3, #0x1100", asm)
 
-    def test_splvuf_tce_sites_are_not_past_enable_mmu(self):
+    def test_splvuf_tce_sites_and_post_mmu_sites_are_separate(self):
         self.assertLessEqual(
-            max(site for site, _ in BUILDER.HEAD_WRAPPER_PATCH_SITES), 0x0074)
+            max(definition["site"] for definition in BUILDER._HEAD_WRAPPER_DEFS), 0x0074)
+        self.assertEqual(BUILDER.POST_MMU_PATCH_SITES,
+                         ((0xAA72E0, 0x1C0), (0xAA78B0, 0x200)))
         self.assertEqual(BUILDER.HEAD_WRAPPER_CAVE_SIZE,
                          9 * BUILDER.HEAD_WRAPPER_SLOT_SIZE)
 
@@ -147,6 +149,61 @@ class HeadEntryProbeTest(unittest.TestCase):
         ))
         # No instruction in this exact trampoline writes r0/r1/r2/r4; r4 is
         # consumed only as the decompressed-kernel branch target.
+
+    def test_post_mmu_sites_and_device_pgd_descriptor_are_pinned(self):
+        self.assertEqual(BUILDER.POST_MMU_PATCH_SITES,
+                         ((0xAA72E0, 0x1C0), (0xAA78B0, 0x200)))
+        self.assertEqual(BUILDER.POST_MMU_STOCK_WORDS,
+                         {0xAA72E0: bytes.fromhex("40308fe2"),
+                          0xAA78B0: bytes.fromhex("f0432de9")})
+        self.assertEqual(BUILDER.UART_PGD_INDEX, 0xC10)
+        self.assertEqual(BUILDER.UART_PGD_OFFSET, 0x3040)
+        self.assertEqual(BUILDER.UART_DEVICE_SECTION, 0x11011C12)
+        self.assertEqual(BUILDER.UART_DEVICE_SECTION & 0xFFFF, 0x1C12)
+
+    def test_post_mmu_wrappers_have_dual_channels_and_displaced_semantics(self):
+        asm = BUILDER._post_mmu_wrapper_asm()
+        self.assertIn("movw    r12, #0x2000", asm)
+        self.assertIn("movt    r12, #0xc100", asm.lower())
+        self.assertIn("movw    r12, #0xf000", asm.lower())
+        self.assertIn("movt    r12, #0xc0df", asm.lower())
+        self.assertNotIn("sub     r12, r12, #0x21000", asm.lower())
+        self.assertIn("strb    r3, [r12, #4]", asm.lower())
+        self.assertIn("strb    r0, [r12, #5]", asm.lower())
+        m_wrapper = asm.split("wrapper_M:", 1)[1].split(".org 0x200", 1)[0]
+        self.assertNotIn("r0", m_wrapper.lower(),
+                         "M wrapper must preserve live SCTLR value in r0")
+        self.assertIn("mcr     p15, 0, r12, c7, c10, 1", asm.lower())
+        self.assertIn("movw    r3, #0xf328", asm.lower())
+        self.assertIn("movt    r3, #0xc0aa", asm.lower())
+        self.assertIn(".equ M_SITE, 0xc0aaf2e0", asm)
+        self.assertIn("b       M_SITE + 4", asm)
+        self.assertIn(".word   0xe92d43f0", asm.lower())
+        self.assertIn(".equ W_SITE, 0xc0aaf8b0", asm)
+        self.assertIn("b       W_SITE + 4", asm)
+
+        blob = BUILDER.assemble_head_wrappers()
+        self.assertEqual(blob[0x1C0:0x200], BUILDER.POST_MMU_M_EXPECTED)
+        self.assertEqual(blob[0x200:0x240], BUILDER.POST_MMU_W_EXPECTED)
+
+    def test_head_patch_words_include_post_mmu_redirects(self):
+        self.assertEqual(len(BUILDER.HEAD_WRAPPER_PATCH_SITES), 9)
+        for site, wrapper in BUILDER.POST_MMU_PATCH_SITES:
+            with self.subTest(site=site, wrapper=wrapper):
+                self.assertEqual(
+                    BUILDER.assemble_head_wrapper_patch(site, wrapper),
+                    BUILDER.head_wrapper_patch_word(site, wrapper),
+                )
+
+    def test_payload_has_retained_marker_dump_and_invalidate_contract(self):
+        source = (ROOT / "lk-payload/main.c").read_text()
+        self.assertIn("0x40DFF000U", source)
+        self.assertIn("K32P", source)
+        self.assertIn('"K32P magic ok markers="', source)
+        self.assertIn("low_uart_put(p[4]);", source)
+        self.assertIn("low_uart_put(p[5]);", source)
+        self.assertIn("dump_retained_post_mmu_markers();", source)
+        self.assertIn("memset((void *)RETAINED_POST_MMU_BASE, 0, RETAINED_POST_MMU_SIZE);", source)
 
 
 if __name__ == "__main__":

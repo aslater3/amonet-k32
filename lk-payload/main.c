@@ -38,6 +38,24 @@ static uint32_t g_initrd_start, g_initrd_end;
 #define ATF_CTL_LIMIT 0x5FA00000U
 #define ATF_CRASH_MAX 0x20000U
 
+/* The post-MMU kernel markers survive the warm watchdog reset in ordinary
+ * lowmem.  Keep this block outside the kernel [_end] range and invalidate it
+ * after one read so a later boot cannot report stale evidence. */
+#define RETAINED_POST_MMU_BASE 0x40DFF000U
+#define RETAINED_POST_MMU_SIZE 0x1000U
+static void dump_retained_post_mmu_markers(void)
+{
+    const volatile uint8_t *p =
+        (const volatile uint8_t *)RETAINED_POST_MMU_BASE;
+    if (p[0] == 'K' && p[1] == '3' && p[2] == '2' && p[3] == 'P') {
+        printf("K32P magic ok markers=");
+        low_uart_put(p[4]);
+        low_uart_put(p[5]);
+        low_uart_put('\n');
+    }
+    /* Dump-and-invalidate: consume even malformed/stale records. */
+    memset((void *)RETAINED_POST_MMU_BASE, 0, RETAINED_POST_MMU_SIZE);
+}
 static void dump_previous_atf_crash(void)
 {
     const volatile uint32_t *ctl = (const volatile uint32_t *)ATF_CTL_BASE;
@@ -447,6 +465,7 @@ int main() {
     printf("Radar/Puffin native K32 diagnostic (Biscuit-derived Amonet) by k4y0z and R0rt1z2. Copyright 2020-2026\n");
 
     dump_previous_atf_crash();
+    dump_retained_post_mmu_markers();
     parse_gpt();
 
     if (!g_boot_a_x || !g_boot_b_x || !g_lk_a) {

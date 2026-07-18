@@ -21,7 +21,7 @@ EVT_PADDED_SIZE = 0x10000  # totalsize inflated + zero-padded: libfdt needs slac
 EVT_SHA256 = "f44630ba28f503dd7503bc7cffa2ee96a319acf2f58f1456bb6f5ff23d57dee1"
 KERNEL_GZIP_OFFSET = 0x46D8
 KERNEL_GZIP_SIZE = 0x5741FB
-KERNEL_GZIP_PROBED_SIZE = 0x573D3D
+KERNEL_GZIP_PROBED_SIZE = 0x573D28
 DECOMPRESSED_KERNEL_SIZE = 0xB86070
 HEAD_ENTRY_BRANCH = bytes.fromhex("300200ea")
 HEAD_TRAMPOLINE_OFF = 0x8C8
@@ -43,6 +43,8 @@ HEAD_WRAPPER_PATCHES = {
     0x005C: ("590000eb", "3cb41deb"),
     0x0060: ("070000eb", "4bb41deb"),
     0x0074: ("d20100ea", "56b41dea"),
+    0xAA72E0: ("40308fe2", "cb17f3ea"),
+    0xAA78B0: ("f0432de9", "6716f3ea"),
 }
 HEAD_WRAPPER_CAVE = bytearray(HEAD_WRAPPER_CAVE_SIZE)
 for _offset, _slot in {
@@ -63,10 +65,20 @@ for _offset, _slot in {
         "0088bde8"),
     0x140: (
         "00482de9b94be2eb003002e3003141e354c0a0e300c083e5"
+        "403003e3033084e012cc01e300c141e300c083e5"
         "0088bde8"),
     0x180: (
         "003002e3003141e343c0a0e300c083e5"
         "003002e3003141e345c0a0e300c083e5724de2ea"),
+    0x1C0: (
+        "00c002e300c14ce34d30a0e300308ce5"
+        "00c00fe3dfc04ce30430cce54b3303e3"
+        "323045e300308ce54ff07ff53acf07ee"
+        "4ff07ff528330fe3aa304ce323e80cea"),
+    0x200: (
+        "00c002e300c14ce35700a0e300008ce5"
+        "00c00fe3dfc04ce30500cce54ff07ff5"
+        "3acf07ee4ff07ff5f0432de98be90cea"),
 }.items():
     _blob = bytes.fromhex(_slot)
     HEAD_WRAPPER_CAVE[_offset:_offset + len(_blob)] = _blob
@@ -75,16 +87,50 @@ STOCK_HEAD_AFTER_BRANCH = bytes.fromhex(
     "00900fe1" "1a9029e2" "1f0019e3" "1f90c9e3" "d39089e3")
 STOCK_HEAD_CAVE = struct.pack("<I", 0xE320F000) * 6
 STOCK_DECOMPRESSED_SHA256 = "3eac3f3daf9daa04f1b67e78c3f2b1ead9a74d64aae435ef5f1988916d31cbd2"
+UART_PGD_INDEX = 0xC10
+UART_PGD_OFFSET = 0x3040
+UART_DEVICE_SECTION = 0x11011C12
+POST_MMU_CAVE_VA = 0xC0775054
+POST_MMU_M_SITE_VA = 0xC0AAF2E0
+POST_MMU_W_SITE_VA = 0xC0AAF8B0
+POST_MMU_RETAINED_PHYS = 0x40DFF000
+POST_MMU_RETAINED_VA = 0xC0DFF000
+POST_MMU_RETAINED_LOAD = bytes.fromhex("00c00fe3dfc04ce3")
+POST_MMU_M_MARKER_AND_MAGIC = bytes.fromhex(
+    "0430cce54b3303e3323045e300308ce5")
+POST_MMU_W_MARKER = bytes.fromhex("0500cce5")
+# Independent displaced-instruction pins: M reconstructs the original
+# add r3,pc,#64 result (C0AAF328), while W relocates the exact start_kernel
+# push {r4-r9,sl,fp,lr} word before resuming at site+4.
+POST_MMU_M_DISPLACED = bytes.fromhex("28330fe3aa304ce3")
+POST_MMU_W_DISPLACED = bytes.fromhex("f0432de9")
+POST_MMU_M_EXPECTED = bytes.fromhex(
+    "00c002e300c14ce34d30a0e300308ce5"
+    "00c00fe3dfc04ce30430cce54b3303e3"
+    "323045e300308ce54ff07ff53acf07ee"
+    "4ff07ff528330fe3aa304ce323e80cea")
+POST_MMU_W_EXPECTED = bytes.fromhex(
+    "00c002e300c14ce35700a0e300008ce5"
+    "00c00fe3dfc04ce30500cce54ff07ff5"
+    "3acf07ee4ff07ff5f0432de98be90cea"
+    "00000000000000000000000000000000")
+# T-wrapper sequence after its UART marker: r4 is the page-table base,
+# 0x3040 is pgd[0xC10], and 0x11011C12 is the pinned Device section.
+POST_MMU_PGD_POKE = bytes.fromhex(
+    "403003e3033084e012cc01e300c141e300c083e5")
+POST_MMU_PGD_POKE_OFFSET = 0x140 + 0x18
+POST_MMU_M_BRANCH_OFFSET = 0x1C0 + 0x3C
+POST_MMU_W_BRANCH_OFFSET = 0x200 + 0x2C
 
 EXPECTED = {
     "lk.bin": "5cb92494340417b1e5d18c3eaa34844dbcfec2cc8086451f087867cd06b15472",
-    "boot-k32-native-evt.img": "c53ebcfc6499bffb363cc4c4f262b4e5b01faf7f7c6d750d4307ec9794c88d12",
+    "boot-k32-native-evt.img": "13922dcfdb045ba3b67f8709c395254ac7a3582e2819b545adf0f604dae31424",
     "boot-k32-native-diag.hdr": "dbbff7eeb8830c0d6cde454a97dc31be73d1cba32e6be9b21fe3c7be2b659066",
-    "boot-k32-native-diag.payload": "e885a546af1f896a73ac34224abb98482509f59ae3d70eae2ac4ed0f264d6e74",
-    "boot-k32-native-diag-wrapper.full.img": "0c264f23f0ba043ef316f170ffa9fdcf90ec0835b92af8adbf1891607985aa4d",
-    "boot-k32-native-diag-wrapper.sparse.img": "5e9b11b4dce22b77873985b7c50cf2de6b6a12b6a81ec9b7ac295eb25f840c23",
+    "boot-k32-native-diag.payload": "5e9908c33221c5d39f52e2ffb4fd8c733d55a4b40501074ff12a01ec35a8b9cd",
+    "boot-k32-native-diag-wrapper.full.img": "64f14102856bf905073fff756058b2bc175be0888dcb5c060ffb619e004eb72f",
+    "boot-k32-native-diag-wrapper.sparse.img": "7a1b548551537b918fb39cddd3b2a00ef380f819a40178bd2982d9c75b291c26",
 }
-RAW_PAYLOAD_SHA256 = "0eee04f0358d447fe22ee37645b0ce0218cb3e067375b4241d19b391a02f1476"
+RAW_PAYLOAD_SHA256 = "ed520aa2c9848e6d57f9adfc62d868892b322810e1ac71d478115fc9fdd01869"
 
 # Assembled by tools/build-native-k32-diagnostic.py (arm-none-eabi-as
 # -march=armv7-a). Replaces the stock 8-NOP sled at the zImage entry; writes
@@ -166,6 +212,16 @@ def arm_branch_sources_into(blob: bytes, base: int, low: int, high: int) -> list
             sources.append(base + offset)
     return sources
 
+
+def arm_branch_destination(blob: bytes, base: int, source: int) -> int:
+    """Decode one aligned ARM B/BL destination from a blob VMA."""
+    offset = source - base
+    word = struct.unpack_from("<I", blob, offset)[0]
+    require(((word >> 25) & 0x7) == 0x5, f"not an ARM B/BL at 0x{source:x}")
+    displacement = word & 0xFFFFFF
+    if displacement & 0x800000:
+        displacement -= 1 << 24
+    return (source + 8 + (displacement << 2)) & 0xFFFFFFFF
 
 def little_endian_pointers_into(blob: bytes, low: int, high: int) -> list[int]:
     """Return aligned words whose little-endian value points into an interval."""
@@ -264,12 +320,55 @@ def verify_boot_image(image: bytes) -> None:
     wrapper_end = HEAD_WRAPPER_CAVE_OFF + HEAD_WRAPPER_CAVE_SIZE
     require(raw[HEAD_WRAPPER_CAVE_OFF:wrapper_end] == HEAD_WRAPPER_CAVE,
             "expanded head.S wrapper encoding mismatch")
+    require(raw[HEAD_WRAPPER_CAVE_OFF + POST_MMU_PGD_POKE_OFFSET:
+                HEAD_WRAPPER_CAVE_OFF + POST_MMU_PGD_POKE_OFFSET +
+                len(POST_MMU_PGD_POKE)] == POST_MMU_PGD_POKE,
+            "T-wrapper UART PGD poke sequence mismatch")
+    require(POST_MMU_CAVE_VA == HEAD_WRAPPER_CAVE_ADDR + 0x80000000,
+            "post-MMU wrapper VMA is not the physical cave alias")
+    require(POST_MMU_RETAINED_VA == POST_MMU_RETAINED_PHYS + 0x80000000,
+            "post-MMU retained VA/physical alias changed")
+    require(UART_DEVICE_SECTION == 0x11011C12,
+            "UART PGD descriptor changed")
+    require(POST_MMU_M_SITE_VA == 0xC0AAF2E0 and
+            POST_MMU_W_SITE_VA == 0xC0AAF8B0,
+            "post-MMU patch-site VMA contract changed")
+    m_slot = raw[HEAD_WRAPPER_CAVE_OFF + 0x1C0:
+                 HEAD_WRAPPER_CAVE_OFF + 0x200]
+    w_slot = raw[HEAD_WRAPPER_CAVE_OFF + 0x200:
+                 HEAD_WRAPPER_CAVE_OFF + 0x240]
+    require(m_slot[0x10:0x18] == POST_MMU_RETAINED_LOAD and
+            w_slot[0x10:0x18] == POST_MMU_RETAINED_LOAD,
+            "post-MMU retained address load changed")
+    require(m_slot[0x18:0x28] == POST_MMU_M_MARKER_AND_MAGIC,
+            "post-MMU M retained magic/marker layout changed")
+    require(m_slot[0x34:0x3C] == POST_MMU_M_DISPLACED,
+            "post-MMU M displaced add semantics changed")
+    require(w_slot[0x18:0x1C] == POST_MMU_W_MARKER,
+            "post-MMU W retained marker offset changed")
+    require(w_slot[0x28:0x2C] == POST_MMU_W_DISPLACED,
+            "post-MMU W displaced push semantics changed")
+    require(m_slot == POST_MMU_M_EXPECTED,
+            "post-MMU M wrapper slot encoding mismatch")
+    require(w_slot == POST_MMU_W_EXPECTED,
+            "post-MMU W wrapper slot encoding mismatch")
+    require(arm_branch_destination(
+        raw, 0x40008000,
+        HEAD_WRAPPER_CAVE_ADDR + POST_MMU_M_BRANCH_OFFSET) ==
+        0x40008000 + 0xAA72E0 + 4,
+        "post-MMU M wrapper does not resume at __mmap_switched+4")
+    require(arm_branch_destination(
+        raw, 0x40008000,
+        HEAD_WRAPPER_CAVE_ADDR + POST_MMU_W_BRANCH_OFFSET) ==
+        0x40008000 + 0xAA78B0 + 4,
+        "post-MMU W wrapper does not resume at start_kernel+4")
     for offset in (0x040, 0x080, 0x0C0, 0x100, 0x140):
         require(raw[HEAD_WRAPPER_CAVE_OFF + offset:
                     HEAD_WRAPPER_CAVE_OFF + offset + 4] == HEAD_WRAPPER_CALL_START,
                 f"call wrapper 0x{offset:x} does not start with push {{r11, lr}}")
-        require(raw[HEAD_WRAPPER_CAVE_OFF + offset + 0x18:
-                    HEAD_WRAPPER_CAVE_OFF + offset + 0x1C] == HEAD_WRAPPER_CALL_END,
+        end_offset = 0x2C if offset == 0x140 else 0x18
+        require(raw[HEAD_WRAPPER_CAVE_OFF + offset + end_offset:
+                    HEAD_WRAPPER_CAVE_OFF + offset + end_offset + 4] == HEAD_WRAPPER_CALL_END,
                 f"call wrapper 0x{offset:x} does not end with pop {{r11, pc}}")
     stock = (ROOT / "inputs/boot-v184-stock32-parity-stock.img").read_bytes()
     stock_kernel_size = struct.unpack_from("<I", stock, 8)[0]
@@ -286,6 +385,11 @@ def verify_boot_image(image: bytes) -> None:
                 f"stock head.S word changed at 0x{site:x}")
         require(raw[site:site + 4] == bytes.fromhex(patched_word),
                 f"expanded head.S patch mismatch at 0x{site:x}")
+    for site, wrapper_offset in ((0xAA72E0, 0x1C0), (0xAA78B0, 0x200)):
+        require(arm_branch_destination(raw, 0x40008000,
+                                       0x40008000 + site) ==
+                HEAD_WRAPPER_CAVE_ADDR + wrapper_offset,
+                f"post-MMU site 0x{site:x} does not branch to its wrapper")
     require(not arm_branch_sources(stock_raw, 0x40008000, 0x400088C8),
             "stock decompressed Image directly branches into H/I NOP cave")
     require(stock_raw[HEAD_WRAPPER_CAVE_OFF:wrapper_end] ==
@@ -405,6 +509,7 @@ def main() -> None:
         b"ATFCR bounds rejected",
         b"ATFCR dump begin",
         b"ATFCR dump end",
+        b"K32P magic ok markers=",
     ):
         require(marker in raw_payload, f"compiled payload marker missing: {marker!r}")
     require(b"K64 FDT prep" not in raw_payload, "obsolete cached=1 marker remains")
@@ -419,6 +524,19 @@ def main() -> None:
             "ATF crash-record bound does not accept the observed 0x20000-byte buffer")
     require("addr > ATF_CTL_LIMIT - size" in added_source,
             "ATF crash-record end bound is missing")
+    require("#define RETAINED_POST_MMU_BASE 0x40DFF000U" in added_source,
+            "post-MMU retained block base is missing")
+    require("#define RETAINED_POST_MMU_SIZE 0x1000U" in added_source,
+            "post-MMU retained block size is missing")
+    require("p[0] == 'K' && p[1] == '3' && p[2] == '2' && p[3] == 'P'" in added_source,
+            "post-MMU retained magic check is missing")
+    require("low_uart_put(p[4]);" in added_source and
+            "low_uart_put(p[5]);" in added_source,
+            "post-MMU retained marker offsets are missing")
+    require("memset((void *)RETAINED_POST_MMU_BASE, 0, RETAINED_POST_MMU_SIZE);" in added_source,
+            "post-MMU retained block is not invalidated")
+    require("dump_retained_post_mmu_markers();" in added_source,
+            "post-MMU retained dump is not placed in main")
     require("dev->read(dev, g_misc * 0x200, bootloader_msg, 0x20, USER_PART);" in added_source,
             "misc bootloader message does not read UART_PLEASE half")
     selector_writes = [

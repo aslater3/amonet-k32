@@ -135,7 +135,7 @@ no direct ARM branch into the region. The six-word H/I trampoline:
 5. branches to untouched `head.S+8` (`eor r9,r9,#HYP_MODE`).
 
 Thus the stock `safe_svcmode_maskall` ordering and all untouched kernel bytes
-remain unchanged; the separate expanded cave and seven early-head redirect words
+remain unchanged; the separate expanded cave and nine early-head redirect words
 carry the additional markers described below. The kernel is recompressed into
 the exact original `0x5741fb`-byte envelope. Saved space is zero-filled except
 for the mandatory
@@ -189,6 +189,47 @@ returning to each patched call site +4.
 | `T` | `0x40008060` | `BL` wrapper calls `__create_page_tables`, emits `T` after return. |
 | `C` | `0x40008074` | CPU-specific init returned through `ret lr`; the C/E cave emits `C`. |
 | `E` | `0x40008074` → `0x400087C4` | Same cave emits `E`, then performs the untouched `B __enable_mmu`. |
+
+### Post-MMU dual-channel markers
+
+The `T` wrapper also writes `pgd[0xC10]` at `[r4,#0x3040]` with the pinned
+Device-section descriptor `0x11011C12`. This maps UART physical `0x11000000`
+to VA `0xC1000000`, including THR VA `0xC1002000`. `paging_init` may later
+replace this entry; that is an expected limitation of the narrow early mapping.
+
+After the MMU transition, two wrappers run at their real virtual VMAs and emit
+both a raw UART marker and a retained low-memory marker:
+
+| Marker | Runtime site | Raw UART channel | Retained channel |
+|---|---|---|---|
+| `M` | `__mmap_switched`, VA `0xC0AAF2E0` (Image offset `0xAA72E0`) | `M` through VA `0xC1002000` | `M` at `0xC0DFF000+4` |
+| `W` | `start_kernel`, VA `0xC0AAF8B0` (Image offset `0xAA78B0`) | `W` through VA `0xC1002000` | `W` at `0xC0DFF000+5` |
+
+The retained record is `K32P` at `0x40DFF000` physical / `0xC0DFF000`
+virtual, with marker bytes at `+4` and `+5`. Each wrapper performs
+`DSB; DCCMVAC; DSB` after its retained write. At the beginning of the next
+LK payload, a valid record prints `K32P magic ok markers=<M><W>` and the full
+`0x1000` block is then zeroed, including malformed records. This is a
+single-boot dump-and-invalidate channel, not a persistent event log.
+
+Interpret the post-MMU evidence together with the existing UART stream:
+
+| Observed evidence | Interpretation / next boundary |
+|---|---|
+| `TCE` but no `M` | Failure in `__enable_mmu` entry/transition or `turn_mmu_on`; inspect the MMU handoff and first post-MMU fetch. |
+| `M` but no `W` | `__mmap_switched` ran; failure is before or inside the early `start_kernel` path. |
+| `MW` but no kernel text | `start_kernel` was reached, but the failure is before earlycon/normal kernel text; inspect very-early init and console setup. |
+| `MW` plus early serial console | Kernel is alive past the diagnostic sites; try the custom initramfs/next userspace-stage probe. |
+
+Caveats: the retained block is ordinary low memory and may become
+allocator-owned if the kernel gets far enough; allocation or later writes can
+therefore clobber it, producing an acceptable false negative. The UART PGD
+poke is intentionally temporary and may be overwritten by normal `paging_init`
+setup. M/W prove execution of the wrappers and their immediate cache-clean
+sequence, not successful completion of `start_kernel`, a healthy scheduler,
+or a booted userspace. Raw UART and retained markers can be observed on
+different boots; correlate the retained `K32P` record with the immediately
+preceding reset and remember that LK consumes it once.
 
 The expected one-boot stream after the existing probes is `KDHI SPLVUTFCE`
 (UART output has no separators: `KDHISPLVUTFCE`). Interpretation is ordered:
