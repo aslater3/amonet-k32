@@ -32,6 +32,40 @@ typedef int (*boot_linux_fdt_fn)(uint32_t, uint32_t, uint32_t,
 /* linux,initrd-start/end values captured as LK writes them into the FDT. */
 static uint32_t g_initrd_start, g_initrd_end;
 
+/* MediaTek ATF leaves the previous crash record in this control block.
+ * Dump it before LK/device setup can reuse the retained logging area. */
+#define ATF_CTL_BASE  0x5F800000U
+#define ATF_CTL_LIMIT 0x5FA00000U
+#define ATF_CRASH_MAX 0x4000U
+
+static void dump_previous_atf_crash(void)
+{
+    const volatile uint32_t *ctl = (const volatile uint32_t *)ATF_CTL_BASE;
+    uint32_t addr = ctl[14];
+    uint32_t size = ctl[15];
+    uint32_t flag = ctl[16];
+
+    printf("ATFCR flag=%08x addr=%08x size=%08x\n", flag, addr, size);
+    if (addr < ATF_CTL_BASE || addr >= ATF_CTL_LIMIT ||
+        size == 0 || size > ATF_CRASH_MAX ||
+        addr > ATF_CTL_LIMIT - size) {
+        printf("ATFCR bounds rejected\n");
+        return;
+    }
+
+    printf("ATFCR dump begin\n");
+    const volatile uint8_t *p = (const volatile uint8_t *)addr;
+    for (uint32_t i = 0; i < size; i++) {
+        uint8_t c = p[i];
+        if (c == '\n' || c == '\r' || (c >= 0x20 && c <= 0x7e))
+            low_uart_put(c);
+        else
+            low_uart_put('.');
+    }
+    low_uart_put('\n');
+    printf("ATFCR dump end\n");
+}
+
 static int diag_fdt_setprop(void *fdt, int node, const char *name,
                             const void *value, int len)
 {
@@ -412,6 +446,7 @@ int main() {
     printf("This is LK-payload by xyz. Copyright 2019\n");
     printf("Biscuit native K32 EVT diagnostic by k4y0z and R0rt1z2. Copyright 2020-2026\n");
 
+    dump_previous_atf_crash();
     parse_gpt();
 
     if (!g_boot_a_x || !g_boot_b_x || !g_lk_a) {

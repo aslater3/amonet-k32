@@ -131,6 +131,23 @@ an entry/cache/relocation failure from a failure after decompression:
 The `D` probe is assembled at build time and the verifier checks the exact
 branch, five probe words, and trailing NOP sentinel.
 
+Before GPT parsing, the payload also inspects the retained MediaTek ATF crash
+control block at `0x5F800000`: indices 14, 15, and 16 provide the crash-buffer
+address, size, and flag. It prints `ATFCR flag=... addr=... size=...`, rejects
+anything outside `0x5F800000–0x5FA00000` or larger than `0x4000`, and replaces
+non-printable bytes with `.` while dumping the bounded record. This is
+read-only and runs before normal LK/device setup:
+
+```text
+ATFCR flag=<hex> addr=<hex> size=<hex>
+ATFCR dump begin
+<bounded printable crash record>
+ATFCR dump end
+```
+
+If the metadata is stale or invalid, the payload prints `ATFCR bounds rejected`
+and continues normally.
+
 This directory is its own Git repository and contains the patched Amonet
 source (`lk-payload/`), BROM injector source (`brom-payload/` and `modules/`),
 exact firmware inputs, generated artifacts, deployment scripts and the

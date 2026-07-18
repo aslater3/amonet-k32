@@ -13,7 +13,7 @@ LK_BASE = 0x4BD00000
 LK_HEADER_SIZE = 0x200
 PAYLOAD_BLOCK = 223215
 RAW_PAYLOAD_OFFSET = 576
-RAW_PAYLOAD_SIZE = 0x17EC
+RAW_PAYLOAD_SIZE = 0x18C8
 ZIMAGE_END = 0x578910
 EVT_SIZE = 0xC875
 EVT_PADDED_SIZE = 0x10000  # totalsize inflated + zero-padded: libfdt needs slack for fixups
@@ -23,11 +23,11 @@ EXPECTED = {
     "lk.bin": "5cb92494340417b1e5d18c3eaa34844dbcfec2cc8086451f087867cd06b15472",
     "boot-k32-native-evt.img": "b7764a69ca00a3c38b80c09dfc1e6d644fd3510771c378df6ac47c91dd08afc4",
     "boot-k32-native-diag.hdr": "dbbff7eeb8830c0d6cde454a97dc31be73d1cba32e6be9b21fe3c7be2b659066",
-    "boot-k32-native-diag.payload": "be910c9f87a8c53e7f870617d1711c87cf72151af46eae93bb773e4a5a38df65",
-    "boot-k32-native-diag-wrapper.full.img": "0cede4610e83662da83b7d2ad1df20c79d3bf080c8bd74fca9817dbe31b1466a",
-    "boot-k32-native-diag-wrapper.sparse.img": "b8883e47bed36dae0a1527456bbd6ddc1e0d67b91e7917f0b66202cb7c1e13a3",
+    "boot-k32-native-diag.payload": "b47162befbfd352451214609854bd5ff283a987e6de695ac648ee474984decbf",
+    "boot-k32-native-diag-wrapper.full.img": "cab8811ef5bfb42814cf0e2fd2c7df7eedce3cb7f644b5b3f8a7455b4e59c0bd",
+    "boot-k32-native-diag-wrapper.sparse.img": "39019775bf83ccf14d576ad54aa7005ee1802733a1dcf51f92c222a381f68552",
 }
-RAW_PAYLOAD_SHA256 = "5235d980a69e1696154cfbb22408a47ec39d56556346a41ee3be37264a60ab6c"
+RAW_PAYLOAD_SHA256 = "e9089cf6be7094906691a81bcbe2f89516f2662aad79e3635c7cf6acad85dcc2"
 
 # Assembled by tools/build-native-k32-diagnostic.py (arm-none-eabi-as
 # -march=armv7-a). Replaces the stock 8-NOP sled at the zImage entry; writes
@@ -232,6 +232,10 @@ def main() -> None:
         b"K32J fdt magic=%x total=%x",
         b"K32J initrd %x-%x head %x %x %x %x",
         b"block_off=%08x%08x",
+        b"ATFCR flag=%08x addr=%08x size=%08x",
+        b"ATFCR bounds rejected",
+        b"ATFCR dump begin",
+        b"ATFCR dump end",
     ):
         require(marker in raw_payload, f"compiled payload marker missing: {marker!r}")
     require(b"K64 FDT prep" not in raw_payload, "obsolete cached=1 marker remains")
