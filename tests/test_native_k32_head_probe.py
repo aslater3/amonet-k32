@@ -25,7 +25,7 @@ class HeadEntryProbeTest(unittest.TestCase):
         patched, metadata = BUILDER.install_head_entry_probe(stock_zimage)
 
         self.assertEqual(len(patched), len(stock_zimage))
-        self.assertEqual(metadata["marker"], "HI")
+        self.assertEqual(metadata["marker"], BUILDER.HEAD_MARKER_SEQUENCE)
         self.assertEqual(metadata["raw_head"], BUILDER.HEAD_ENTRY_BRANCH)
         self.assertLessEqual(metadata["new_stream_size"], metadata["old_stream_size"])
         self.assertEqual(patched[BUILDER.KERNEL_GZIP_END - 4:BUILDER.KERNEL_GZIP_END],
@@ -36,17 +36,86 @@ class HeadEntryProbeTest(unittest.TestCase):
         raw = BUILDER.decompress_kernel_image(patched)
         stock_raw = BUILDER.decompress_kernel_image(stock_zimage)
         self.assertEqual(raw[:4], BUILDER.HEAD_ENTRY_BRANCH)
-        self.assertEqual(raw[4:BUILDER.HEAD_TRAMPOLINE_OFF],
-                         stock_raw[4:BUILDER.HEAD_TRAMPOLINE_OFF])
+        cave_end = (BUILDER.HEAD_WRAPPER_CAVE_OFF +
+                    BUILDER.HEAD_WRAPPER_CAVE_SIZE)
         self.assertEqual(
-            raw[BUILDER.HEAD_TRAMPOLINE_OFF:
-                BUILDER.HEAD_TRAMPOLINE_OFF + BUILDER.HEAD_TRAMPOLINE_SIZE],
-            BUILDER.assemble_head_trampoline(),
+            raw[BUILDER.HEAD_WRAPPER_CAVE_OFF:cave_end],
+            BUILDER.assemble_head_wrappers(),
         )
-        self.assertEqual(raw[BUILDER.HEAD_TRAMPOLINE_OFF +
-                             BUILDER.HEAD_TRAMPOLINE_SIZE:],
-                         stock_raw[BUILDER.HEAD_TRAMPOLINE_OFF +
-                                   BUILDER.HEAD_TRAMPOLINE_SIZE:])
+        allowed = [(0, 4),
+                   (BUILDER.HEAD_TRAMPOLINE_OFF,
+                    BUILDER.HEAD_TRAMPOLINE_OFF + BUILDER.HEAD_TRAMPOLINE_SIZE),
+                   (BUILDER.HEAD_WRAPPER_CAVE_OFF, cave_end)]
+        allowed.extend((site, site + 4)
+                       for site, _ in BUILDER.HEAD_WRAPPER_PATCH_SITES)
+        masked_raw = bytearray(raw)
+        masked_stock = bytearray(stock_raw)
+        for start, end in allowed:
+            masked_raw[start:end] = b"\0" * (end - start)
+            masked_stock[start:end] = b"\0" * (end - start)
+        self.assertEqual(bytes(masked_raw), bytes(masked_stock))
+
+    def test_expanded_wrapper_patch_sites_have_exact_control_flow(self):
+        self.assertEqual(BUILDER.HEAD_MARKER_SEQUENCE, "HISPLVUTFCE")
+        self.assertEqual(BUILDER.HEAD_WRAPPER_MARKERS, "SPLVUTFCE")
+        self.assertEqual(len(BUILDER.HEAD_WRAPPER_PATCH_SITES), 7)
+        self.assertEqual(
+            [site for site, _ in BUILDER.HEAD_WRAPPER_PATCH_SITES],
+            [
+                0x0034,  # S/P: post-SVC join, CPU ID read
+                0x0038,  # L: __lookup_processor_type returned
+                0x0054,  # V: __vet_atags returned
+                0x0058,  # U: __fixup_smp returned
+                0x005C,  # F: __fixup_pv_table returned
+                0x0060,  # T: __create_page_tables returned
+                0x0074,  # C/E: CPU init returned, __enable_mmu branch
+            ],
+        )
+        for site, wrapper in BUILDER.HEAD_WRAPPER_PATCH_SITES:
+            with self.subTest(site=site, wrapper=wrapper):
+                self.assertEqual(
+                    BUILDER.assemble_head_wrapper_patch(site, wrapper),
+                    BUILDER.head_wrapper_patch_word(site, wrapper),
+                )
+
+    def test_wrapper_assembly_uses_flags_safe_uart_stubs_with_r11_save(self):
+        asm = BUILDER._head_wrapper_asm()
+        self.assertNotIn("mov     r11, lr", asm)
+        self.assertNotIn("bx      r11", asm)
+        self.assertIn("bl      0x40008878", asm)
+        self.assertIn("bl      0x4000821c", asm.lower())
+        self.assertIn("bl      0x4000813c", asm.lower())
+        self.assertIn("bl      0x400081c8", asm.lower())
+        self.assertIn("bl      0x40008084", asm.lower())
+        self.assertIn("push    {r11, lr}", asm)
+        self.assertIn("pop     {r11, pc}", asm)
+        self.assertIn("movw    r3, #0x2000", asm)
+        self.assertIn("movt    r3, #0x1100", asm)
+
+    def test_splvuf_tce_sites_are_not_past_enable_mmu(self):
+        self.assertLessEqual(
+            max(site for site, _ in BUILDER.HEAD_WRAPPER_PATCH_SITES), 0x0074)
+        self.assertEqual(BUILDER.HEAD_WRAPPER_CAVE_SIZE,
+                         9 * BUILDER.HEAD_WRAPPER_SLOT_SIZE)
+
+    def test_large_wrapper_cave_is_unreachable_and_unreferenced_in_stock(self):
+        image = (ROOT / "inputs/boot-v184-stock32-parity-stock.img").read_bytes()
+        kernel_size = struct.unpack_from("<I", image, 8)[0]
+        kernel = image[0x800:0x800 + kernel_size]
+        stock_zimage = kernel[0x200:0x200 + BUILDER.ZIMAGE_END]
+        stock_raw = BUILDER.decompress_kernel_image(stock_zimage)
+        start = BUILDER.HEAD_WRAPPER_CAVE_OFF
+        end = start + BUILDER.HEAD_WRAPPER_CAVE_SIZE
+        self.assertEqual(stock_raw[start:end], b"\0" * (end - start))
+        self.assertEqual(BUILDER.head_wrapper_cave_branch_sources(stock_raw), [])
+        self.assertEqual(BUILDER.head_wrapper_cave_literal_pointers(stock_raw), [])
+        # The preceding literal-pool block is skipped by an unconditional stock
+        # branch, and the first non-zero data after the cave is the stock
+        # initcall_debug format string. This pins the cave as padding, not as
+        # reachable code or addressed data.
+        self.assertEqual(stock_raw[0x76D030:0x76D034],
+                         bytes.fromhex("a2a7e2ea"))
+        self.assertTrue(stock_raw[0x76E000:0x76E010].startswith(b"initcall_debug"))
 
     def test_post_hyp_trampoline_has_exact_control_flow(self):
         self.assertEqual(BUILDER.HEAD_ENTRY_BRANCH, bytes.fromhex(

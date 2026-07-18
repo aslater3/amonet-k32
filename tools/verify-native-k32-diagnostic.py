@@ -21,7 +21,7 @@ EVT_PADDED_SIZE = 0x10000  # totalsize inflated + zero-padded: libfdt needs slac
 EVT_SHA256 = "f44630ba28f503dd7503bc7cffa2ee96a319acf2f58f1456bb6f5ff23d57dee1"
 KERNEL_GZIP_OFFSET = 0x46D8
 KERNEL_GZIP_SIZE = 0x5741FB
-KERNEL_GZIP_PROBED_SIZE = 0x573D44
+KERNEL_GZIP_PROBED_SIZE = 0x573D3D
 DECOMPRESSED_KERNEL_SIZE = 0xB86070
 HEAD_ENTRY_BRANCH = bytes.fromhex("300200ea")
 HEAD_TRAMPOLINE_OFF = 0x8C8
@@ -29,6 +29,48 @@ HEAD_TRAMPOLINE_SIZE = 0x18
 HEAD_TRAMPOLINE = bytes.fromhex(
     "00c083e5" "bb4500eb" "49c0a0e3" "00c083e5"
     "00900fe1" "c9fdffea")
+HEAD_WRAPPER_CAVE_OFF = 0x76D054
+HEAD_WRAPPER_CAVE_ADDR = 0x40008000 + HEAD_WRAPPER_CAVE_OFF
+HEAD_WRAPPER_SLOT_SIZE = 0x40
+HEAD_WRAPPER_CAVE_SIZE = 9 * HEAD_WRAPPER_SLOT_SIZE
+HEAD_WRAPPER_CALL_START = bytes.fromhex("00482de9")  # push {r11, lr}
+HEAD_WRAPPER_CALL_END = bytes.fromhex("0088bde8")    # pop {r11, pc}
+HEAD_WRAPPER_PATCHES = {
+    0x0034: ("109f10ee", "06b41dea"),
+    0x0038: ("0e0200eb", "15b41deb"),
+    0x0054: ("700000eb", "1eb41deb"),
+    0x0058: ("370000eb", "2db41deb"),
+    0x005C: ("590000eb", "3cb41deb"),
+    0x0060: ("070000eb", "4bb41deb"),
+    0x0074: ("d20100ea", "56b41dea"),
+}
+HEAD_WRAPPER_CAVE = bytearray(HEAD_WRAPPER_CAVE_SIZE)
+for _offset, _slot in {
+    0x000: (
+        "003002e3003141e353c0a0e300c083e5109f10ee"
+        "003002e3003141e350c0a0e300c083e5ee4be2ea"),
+    0x040: (
+        "00482de9f64de2eb003002e3003141e34cc0a0e300c083e5"
+        "0088bde8"),
+    0x080: (
+        "00482de94f4ce2eb003002e3003141e356c0a0e300c083e5"
+        "0088bde8"),
+    0x0C0: (
+        "00482de9074ce2eb003002e3003141e355c0a0e300c083e5"
+        "0088bde8"),
+    0x100: (
+        "00482de91a4ce2eb003002e3003141e346c0a0e300c083e5"
+        "0088bde8"),
+    0x140: (
+        "00482de9b94be2eb003002e3003141e354c0a0e300c083e5"
+        "0088bde8"),
+    0x180: (
+        "003002e3003141e343c0a0e300c083e5"
+        "003002e3003141e345c0a0e300c083e5724de2ea"),
+}.items():
+    _blob = bytes.fromhex(_slot)
+    HEAD_WRAPPER_CAVE[_offset:_offset + len(_blob)] = _blob
+HEAD_WRAPPER_CAVE = bytes(HEAD_WRAPPER_CAVE)
 STOCK_HEAD_AFTER_BRANCH = bytes.fromhex(
     "00900fe1" "1a9029e2" "1f0019e3" "1f90c9e3" "d39089e3")
 STOCK_HEAD_CAVE = struct.pack("<I", 0xE320F000) * 6
@@ -36,7 +78,7 @@ STOCK_DECOMPRESSED_SHA256 = "3eac3f3daf9daa04f1b67e78c3f2b1ead9a74d64aae435ef5f1
 
 EXPECTED = {
     "lk.bin": "5cb92494340417b1e5d18c3eaa34844dbcfec2cc8086451f087867cd06b15472",
-    "boot-k32-native-evt.img": "d94a5c8c96ced6263b0b4b1bc108a8a6a365db7b4d062d7e7f730d7c644855b9",
+    "boot-k32-native-evt.img": "c53ebcfc6499bffb363cc4c4f262b4e5b01faf7f7c6d750d4307ec9794c88d12",
     "boot-k32-native-diag.hdr": "dbbff7eeb8830c0d6cde454a97dc31be73d1cba32e6be9b21fe3c7be2b659066",
     "boot-k32-native-diag.payload": "e885a546af1f896a73ac34224abb98482509f59ae3d70eae2ac4ed0f264d6e74",
     "boot-k32-native-diag-wrapper.full.img": "0c264f23f0ba043ef316f170ffa9fdcf90ec0835b92af8adbf1891607985aa4d",
@@ -107,6 +149,32 @@ def arm_branch_sources(blob: bytes, base: int, target: int) -> list[int]:
         if destination == target:
             sources.append(base + offset)
     return sources
+
+
+def arm_branch_sources_into(blob: bytes, base: int, low: int, high: int) -> list[int]:
+    """Return aligned ARM B/BL sites targeting an address interval."""
+    sources: list[int] = []
+    for offset in range(0, len(blob) - 3, 4):
+        word = struct.unpack_from("<I", blob, offset)[0]
+        if ((word >> 28) & 0xF) == 0xF or ((word >> 25) & 0x7) != 0x5:
+            continue
+        displacement = word & 0xFFFFFF
+        if displacement & 0x800000:
+            displacement -= 1 << 24
+        destination = (base + offset + 8 + (displacement << 2)) & 0xFFFFFFFF
+        if low <= destination < high:
+            sources.append(base + offset)
+    return sources
+
+
+def little_endian_pointers_into(blob: bytes, low: int, high: int) -> list[int]:
+    """Return aligned words whose little-endian value points into an interval."""
+    pointers: list[int] = []
+    for offset in range(0, len(blob) - 3, 4):
+        value = struct.unpack_from("<I", blob, offset)[0]
+        if low <= value < high:
+            pointers.append(offset)
+    return pointers
 
 
 def lk_slice(lk: bytes, runtime_address: int, size: int) -> bytes:
@@ -193,22 +261,57 @@ def verify_boot_image(image: bytes) -> None:
     cave_end = HEAD_TRAMPOLINE_OFF + HEAD_TRAMPOLINE_SIZE
     require(raw[HEAD_TRAMPOLINE_OFF:cave_end] == HEAD_TRAMPOLINE,
             "decompressed head.S H/I trampoline mismatch")
+    wrapper_end = HEAD_WRAPPER_CAVE_OFF + HEAD_WRAPPER_CAVE_SIZE
+    require(raw[HEAD_WRAPPER_CAVE_OFF:wrapper_end] == HEAD_WRAPPER_CAVE,
+            "expanded head.S wrapper encoding mismatch")
+    for offset in (0x040, 0x080, 0x0C0, 0x100, 0x140):
+        require(raw[HEAD_WRAPPER_CAVE_OFF + offset:
+                    HEAD_WRAPPER_CAVE_OFF + offset + 4] == HEAD_WRAPPER_CALL_START,
+                f"call wrapper 0x{offset:x} does not start with push {{r11, lr}}")
+        require(raw[HEAD_WRAPPER_CAVE_OFF + offset + 0x18:
+                    HEAD_WRAPPER_CAVE_OFF + offset + 0x1C] == HEAD_WRAPPER_CALL_END,
+                f"call wrapper 0x{offset:x} does not end with pop {{r11, pc}}")
     stock = (ROOT / "inputs/boot-v184-stock32-parity-stock.img").read_bytes()
     stock_kernel_size = struct.unpack_from("<I", stock, 8)[0]
     stock_zimage = stock[0x800 + 0x200:0x800 + stock_kernel_size]
     stock_inflater = zlib.decompressobj(16 + zlib.MAX_WBITS)
     stock_raw = stock_inflater.decompress(
         stock_zimage[KERNEL_GZIP_OFFSET:]) + stock_inflater.flush()
-    require(stock_inflater.eof and digest(stock_raw) == STOCK_DECOMPRESSED_SHA256,
+    require(digest(stock_raw) == STOCK_DECOMPRESSED_SHA256,
             "stock decompressed kernel contract changed")
     require(stock_raw[HEAD_TRAMPOLINE_OFF:cave_end] == STOCK_HEAD_CAVE,
             "stock decompressed head.S NOP cave changed")
+    for site, (stock_word, patched_word) in HEAD_WRAPPER_PATCHES.items():
+        require(stock_raw[site:site + 4] == bytes.fromhex(stock_word),
+                f"stock head.S word changed at 0x{site:x}")
+        require(raw[site:site + 4] == bytes.fromhex(patched_word),
+                f"expanded head.S patch mismatch at 0x{site:x}")
     require(not arm_branch_sources(stock_raw, 0x40008000, 0x400088C8),
             "stock decompressed Image directly branches into H/I NOP cave")
-    require(raw[4:HEAD_TRAMPOLINE_OFF] == stock_raw[4:HEAD_TRAMPOLINE_OFF],
-            "H/I-probed kernel differs from stock before trampoline")
-    require(raw[cave_end:] == stock_raw[cave_end:],
-            "H/I-probed kernel differs from stock after trampoline")
+    require(stock_raw[HEAD_WRAPPER_CAVE_OFF:wrapper_end] ==
+            b"\0" * HEAD_WRAPPER_CAVE_SIZE,
+            "stock expanded-wrapper cave is not zero padding")
+    require(not arm_branch_sources_into(
+        stock_raw, 0x40008000, HEAD_WRAPPER_CAVE_ADDR,
+        HEAD_WRAPPER_CAVE_ADDR + HEAD_WRAPPER_CAVE_SIZE),
+            "stock decompressed Image directly branches into expanded-wrapper cave")
+    require(not little_endian_pointers_into(
+        stock_raw, HEAD_WRAPPER_CAVE_ADDR,
+        HEAD_WRAPPER_CAVE_ADDR + HEAD_WRAPPER_CAVE_SIZE),
+            "stock decompressed Image contains a pointer into expanded-wrapper cave")
+    allowed = [
+        (0, 4),
+        (HEAD_TRAMPOLINE_OFF, cave_end),
+        (HEAD_WRAPPER_CAVE_OFF, wrapper_end),
+    ]
+    allowed.extend((site, site + 4) for site in HEAD_WRAPPER_PATCHES)
+    masked_raw = bytearray(raw)
+    masked_stock = bytearray(stock_raw)
+    for start, end in allowed:
+        masked_raw[start:end] = b"\0" * (end - start)
+        masked_stock[start:end] = b"\0" * (end - start)
+    require(bytes(masked_raw) == bytes(masked_stock),
+            "expanded head.S kernel differs from stock outside probe regions")
     gzip_pad_start = KERNEL_GZIP_OFFSET + consumed
     gzip_envelope_end = KERNEL_GZIP_OFFSET + KERNEL_GZIP_SIZE
     gzip_size_word = gzip_envelope_end - 4
@@ -346,6 +449,8 @@ def main() -> None:
     print("zimage_dejump_contract=PASS return=0x924 markers=D,H target=r4")
     print("kernel_head_probe_contract=PASS entry_branch=0x40008000 "
           "trampoline=0x400088C8 markers=H,I resume=0x40008008 "
+          "wrappers=0x40775054 markers=S,P,L,V,U,F,T,C,E "
+          "sites=0x40008034,0x40008038,0x40008054,0x40008058,0x4000805C,0x40008060,0x40008074 "
           "gzip_fixed=0x5741FB terminal_size=0x00B86070")
     print("atf_crash_contract=PASS range=0x5F800000-0x5FA00000 max=0x20000")
     print("wrapper_sparse_contract=PASS block=223215 logical=110MiB")

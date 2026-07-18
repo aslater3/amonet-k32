@@ -134,9 +134,11 @@ no direct ARM branch into the region. The six-word H/I trampoline:
 4. executes the displaced stock `mrs r9,cpsr`; and
 5. branches to untouched `head.S+8` (`eor r9,r9,#HYP_MODE`).
 
-Thus the stock `safe_svcmode_maskall` sequence and every later kernel byte remain
-unchanged. The kernel is recompressed into the exact original
-`0x5741fb`-byte envelope. Saved space is zero-filled except for the mandatory
+Thus the stock `safe_svcmode_maskall` ordering and all untouched kernel bytes
+remain unchanged; the separate expanded cave and seven early-head redirect words
+carry the additional markers described below. The kernel is recompressed into
+the exact original `0x5741fb`-byte envelope. Saved space is zero-filled except
+for the mandatory
 final little-endian `0x00b86070` inflated-size word consumed by `head.S` at
 `input_data_end - 4`; retaining that word is required for safe decompressor
 self-relocation. The zImage end and EVT offset do not move. Interpretation:
@@ -147,13 +149,67 @@ self-relocation. The zImage end and EVT offset do not move. Interpretation:
   the branch into the decompressed H/I trampoline failed.
 - `KDH` without `I` → decompressed code ran, but the branch/call into
   `__hyp_stub_install`, the stub itself, or its return failed.
-- `KDHI` → the virtualization stub returned; any later silence is in
-  `safe_svcmode_maskall`, CPU lookup, FDT vetting, page-table setup, the MMU
-  transition, or a later console path.
+- `KDHI` → the virtualization stub returned; the next marker is the expanded
+  early-head sequence below.
+
+### Expanded early-head markers
+
+The decompressed Image contains one verified zero-padding cave at
+`0x40775054` (offset `0x76D054`, nine `0x40`-byte slots). The stock image has
+no aligned ARM `B`/`BL` target in the cave, no aligned little-endian pointer
+into it, and the preceding stock branch skips the literal/data block before
+the cave; the first non-zero bytes after it are the `initcall_debug` string.
+Only the seven listed head words and this cave are changed. Each UART stub
+reloads THR `0x11002000` with `movw`/`movt` and uses only flags-safe
+`mov`/`str` operations after the displaced stock call. Each call wrapper starts
+with `push {r11, lr}` (`0xE92D4800`) and ends with `pop {r11, pc}`
+(`0xE8BD8800`), so the original caller `LR` and `r11` survive the stock call.
+
+The push/pop wrappers deliberately depend on inherited LK stack state: at the
+five call sites kernel `sp` has not yet been initialized (stock loads kernel
+`sp` at `0x40008064`). LK hands off with `sp = 0x41FFFA80`; this is 8-byte
+aligned, points into plain writable DRAM, and is the dead LK stack at this
+point. A wrapper call writes exactly eight bytes at `0x41FFFA78` (saved `r11`
+and saved `LR`) and the matching pop restores `sp` before returning. The five
+stock functions are disassembled from the deployed stock Image and contain no
+`sp` access or reference to those eight bytes; the dependency is therefore
+limited to the short pre-kernel-stack window before `0x40008064`. ARM `push`,
+`pop`, `bl`, `movw`, `movt`, `mov`, and `str` without the `S` suffix do not
+modify CPSR flags, and `pop {r11, pc}` loads the saved caller `LR` into `pc`,
+returning to each patched call site +4.
+
+| Marker | Site | Mechanism and interpretation |
+|---|---|---|
+| `S` | `0x40008034` | Stock `safe_svcmode_maskall` has completed (both SVC and HYP-ERET joins); cave emits `S`. |
+| `P` | `0x40008034` | Cave executes displaced `mrc p15,0,r9,c0,c0`, then emits `P`; CPU ID read completed. |
+| `L` | `0x40008038` | `BL` wrapper calls `__lookup_processor_type`, emits `L` after return, and pops the saved `LR` into `pc`. |
+| `V` | `0x40008054` | `BL` wrapper calls `__vet_atags`, emits `V` after return. |
+| `U` | `0x40008058` | `BL` wrapper calls `__fixup_smp`, emits `U` after return. |
+| `F` | `0x4000805C` | `BL` wrapper calls `__fixup_pv_table`, emits `F` after return. |
+| `T` | `0x40008060` | `BL` wrapper calls `__create_page_tables`, emits `T` after return. |
+| `C` | `0x40008074` | CPU-specific init returned through `ret lr`; the C/E cave emits `C`. |
+| `E` | `0x40008074` → `0x400087C4` | Same cave emits `E`, then performs the untouched `B __enable_mmu`. |
+
+The expected one-boot stream after the existing probes is `KDHI SPLVUTFCE`
+(UART output has no separators: `KDHISPLVUTFCE`). Interpretation is ordered:
+
+| Last marker | Boundary reached | Next failure plane |
+|---|---|---|
+| `I` | `__hyp_stub_install` returned | `safe_svcmode_maskall` / SVC-HYP join |
+| `S` | SVC mode write and join complete | CPU ID read |
+| `P` | CPU ID read complete | processor-type lookup |
+| `L` | `__lookup_processor_type` returned | ATAG vetting |
+| `V` | `__vet_atags` returned | SMP fixup |
+| `U` | `__fixup_smp` returned | PV-table fixup |
+| `F` | `__fixup_pv_table` returned | page-table creation |
+| `T` | `__create_page_tables` returned | CPU-specific init |
+| `C` | CPU-specific init returned | `__enable_mmu` entry |
+| `E` | `__enable_mmu` branch reached | MMU transition and later code |
 
 All probe code is assembled and linked at its real runtime VMA. The verifier
-decompresses the final artifact, checks the entry branch and exact six-word H/I
-trampoline, proves all bytes outside the entry word and NOP cave remain stock,
+decompresses the final artifact, checks the entry branch, exact H/I trampoline,
+exact S/P/L/V/U/F/T/C/E cave encodings and patch words, proves all bytes outside
+the entry word, seven patched head words, and the two probe caves remain stock,
 and verifies the fixed-size gzip envelope and complete seven-word D trampoline.
 
 Before GPT parsing, the payload also inspects the retained MediaTek ATF crash

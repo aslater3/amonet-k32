@@ -88,6 +88,143 @@ _start:
     b       HEAD_RESUME     @ resume at original eor r9,r9,#HYP_MODE
 """
 
+# Expanded one-shot head.S boundary probe. The 0xFAC-byte zero run at
+# 0x40775054 is padding between a stock literal-pool block and the
+# initcall_debug format string, has no direct B/BL sources, and has no
+# little-endian pointers into it. Use nine fixed 0x40-byte marker slots; the
+# rest of the zero run remains untouched.
+HEAD_WRAPPER_CAVE_OFF = 0x76D054
+HEAD_WRAPPER_CAVE_ADDR = DECOMPRESSED_BASE + HEAD_WRAPPER_CAVE_OFF
+HEAD_WRAPPER_SLOT_SIZE = 0x40
+HEAD_WRAPPER_CAVE_SIZE = 9 * HEAD_WRAPPER_SLOT_SIZE
+HEAD_WRAPPER_STOCK = b"\0" * HEAD_WRAPPER_CAVE_SIZE
+HEAD_WRAPPER_MARKERS = "SPLVUTFCE"
+HEAD_MARKER_SEQUENCE = "HI" + HEAD_WRAPPER_MARKERS
+
+# kind:
+#   sp:   the stock msr at 0x30 has already completed; execute mrc and S/P
+#         markers in one cave, then resume at 0x38
+#   call: BL to wrapper, save inherited r11/LR, BL original, marker, restore
+#         r11/return through the saved LR
+#   ce:   the CPU init returned to the stock branch; emit C/E and branch on
+#         to __enable_mmu
+_HEAD_WRAPPER_DEFS = (
+    {"site": 0x0034, "offset": 0x000, "marker": "SP", "kind": "sp",
+     "target": 0x40008038, "stock": "109f10ee"},
+    {"site": 0x0038, "offset": 0x040, "marker": "L", "kind": "call",
+     "target": 0x40008878, "stock": "0e0200eb"},
+    {"site": 0x0054, "offset": 0x080, "marker": "V", "kind": "call",
+     "target": 0x4000821C, "stock": "700000eb"},
+    {"site": 0x0058, "offset": 0x0C0, "marker": "U", "kind": "call",
+     "target": 0x4000813C, "stock": "370000eb"},
+    {"site": 0x005C, "offset": 0x100, "marker": "F", "kind": "call",
+     "target": 0x400081C8, "stock": "590000eb"},
+    {"site": 0x0060, "offset": 0x140, "marker": "T", "kind": "call",
+     "target": 0x40008084, "stock": "070000eb"},
+    {"site": 0x0074, "offset": 0x180, "marker": "CE", "kind": "ce",
+     "target": 0x400087C4, "stock": "d20100ea"},
+)
+HEAD_WRAPPER_PATCH_SITES = tuple(
+    (definition["site"], definition["offset"]) for definition in _HEAD_WRAPPER_DEFS
+)
+_HEAD_WRAPPER_BY_SITE = {
+    definition["site"]: definition for definition in _HEAD_WRAPPER_DEFS
+}
+_HEAD_WRAPPER_CALL_SITES = {
+    definition["site"] for definition in _HEAD_WRAPPER_DEFS
+    if definition["kind"] == "call"
+}
+# Every call wrapper must preserve the caller's r11 and return address across
+# the stock call.  These are independent word pins: assembler output remains
+# authoritative, but a drift in the push/pop contract fails closed.
+HEAD_WRAPPER_CALL_START = bytes.fromhex("00482de9")  # push {r11, lr}
+HEAD_WRAPPER_CALL_END = bytes.fromhex("0088bde8")    # pop {r11, pc}
+# Independent encoding pins. The assembler remains authoritative for
+# generation; these constants make a toolchain or source drift fail closed.
+HEAD_WRAPPER_PATCH_EXPECTED = {
+    0x0034: bytes.fromhex("06b41dea"),
+    0x0038: bytes.fromhex("15b41deb"),
+    0x0054: bytes.fromhex("1eb41deb"),
+    0x0058: bytes.fromhex("2db41deb"),
+    0x005C: bytes.fromhex("3cb41deb"),
+    0x0060: bytes.fromhex("4bb41deb"),
+    0x0074: bytes.fromhex("56b41dea"),
+}
+HEAD_WRAPPER_SLOT_EXPECTED = {
+    0x000: bytes.fromhex(
+        "003002e3003141e353c0a0e300c083e5109f10ee"
+        "003002e3003141e350c0a0e300c083e5ee4be2ea"),
+    0x040: bytes.fromhex(
+        "00482de9f64de2eb003002e3003141e34cc0a0e300c083e5"
+        "0088bde8"),
+    0x080: bytes.fromhex(
+        "00482de94f4ce2eb003002e3003141e356c0a0e300c083e5"
+        "0088bde8"),
+    0x0C0: bytes.fromhex(
+        "00482de9074ce2eb003002e3003141e355c0a0e300c083e5"
+        "0088bde8"),
+    0x100: bytes.fromhex(
+        "00482de91a4ce2eb003002e3003141e346c0a0e300c083e5"
+        "0088bde8"),
+    0x140: bytes.fromhex(
+        "00482de9b94be2eb003002e3003141e354c0a0e300c083e5"
+        "0088bde8"),
+    0x180: bytes.fromhex(
+        "003002e3003141e343c0a0e300c083e5"
+        "003002e3003141e345c0a0e300c083e5724de2ea"),
+}
+
+
+def expected_head_wrappers() -> bytes:
+    expected = bytearray(HEAD_WRAPPER_CAVE_SIZE)
+    for offset, blob in HEAD_WRAPPER_SLOT_EXPECTED.items():
+        expected[offset:offset + len(blob)] = blob
+    return bytes(expected)
+
+
+def _head_wrapper_asm() -> str:
+    lines = [
+        "    .syntax unified",
+        "    .arm",
+        "    .text",
+        "    .global _start",
+        "    .macro EMIT marker",
+        "    movw    r3, #0x2000",
+        "    movt    r3, #0x1100",
+        "    mov     r12, #\\marker",
+        "    str     r12, [r3]",
+        "    .endm",
+    ]
+    for definition in _HEAD_WRAPPER_DEFS:
+        lines.append(f"    .org 0x{definition['offset']:03x}")
+        if definition["offset"] == 0:
+            lines.append("_start:")
+        lines.append(f"wrapper_{definition['marker']}:")
+        if definition["kind"] == "sp":
+            lines.extend([
+                "    EMIT    'S'",
+                "    mrc     p15, 0, r9, c0, c0",
+                "    EMIT    'P'",
+                f"    b       0x{definition['target']:08x}",
+            ])
+        elif definition["kind"] == "call":
+            lines.extend([
+                "    push    {r11, lr}",
+                f"    bl      0x{definition['target']:08x}",
+                f"    EMIT    '{definition['marker']}'",
+                "    pop     {r11, pc}",
+            ])
+        elif definition["kind"] == "ce":
+            lines.extend([
+                "    EMIT    'C'",
+                "    EMIT    'E'",
+                f"    b       0x{definition['target']:08x}",
+            ])
+        else:
+            raise AssertionError(f"unknown wrapper kind: {definition['kind']}")
+    lines.append(f"    .org 0x{HEAD_WRAPPER_CAVE_SIZE:x}")
+    return "\n".join(lines) + "\n"
+
 # The stock zImage starts with eight ARM NOPs (0x00-0x1f), then the entry
 # branch at 0x20 and the magic/start/end header fields. Replace exactly the
 # NOP sled with an 8-instruction UART probe that writes 'K': if 'K' appears
@@ -213,6 +350,102 @@ def assemble_head_trampoline() -> bytes:
                                  HEAD_TRAMPOLINE_SIZE, "head H/I trampoline")
 
 
+def assemble_head_wrappers() -> bytes:
+    blob = assemble_linked_probe(_head_wrapper_asm(), HEAD_WRAPPER_CAVE_ADDR,
+                                 HEAD_WRAPPER_CAVE_SIZE, "expanded head wrappers")
+    if blob != expected_head_wrappers():
+        raise SystemExit("ERROR: expanded head wrapper encoding changed")
+    for definition in _HEAD_WRAPPER_DEFS:
+        if definition["kind"] != "call":
+            continue
+        offset = definition["offset"]
+        if blob[offset:offset + 4] != HEAD_WRAPPER_CALL_START:
+            raise SystemExit(
+                f"ERROR: call wrapper at 0x{offset:x} lacks push {{r11, lr}}")
+        if blob[offset + 0x18:offset + 0x1C] != HEAD_WRAPPER_CALL_END:
+            raise SystemExit(
+                f"ERROR: call wrapper at 0x{offset:x} lacks pop {{r11, pc}}")
+    return blob
+
+
+def head_wrapper_patch_word(site: int, wrapper_offset: int) -> bytes:
+    """Return the independently calculated ARM B/BL word for a patch site."""
+    definition = _HEAD_WRAPPER_BY_SITE.get(site)
+    if definition is None or definition["offset"] != wrapper_offset:
+        raise SystemExit(f"ERROR: unknown head wrapper patch site 0x{site:x}")
+    source = DECOMPRESSED_BASE + site
+    target = HEAD_WRAPPER_CAVE_ADDR + wrapper_offset
+    displacement = target - (source + 8)
+    if displacement % 4 or not -(1 << 25) <= displacement < (1 << 25):
+        raise SystemExit(
+            f"ERROR: head wrapper target out of range: 0x{source:08x} -> 0x{target:08x}")
+    word = 0xEA000000 | ((displacement >> 2) & 0xFFFFFF)
+    if site in _HEAD_WRAPPER_CALL_SITES:
+        word |= 0x01000000
+    result = struct.pack("<I", word)
+    expected = HEAD_WRAPPER_PATCH_EXPECTED[site]
+    if result != expected:
+        raise SystemExit(f"ERROR: head wrapper patch encoding changed at 0x{site:x}")
+    return result
+
+
+def assemble_head_wrapper_patch(site: int, wrapper_offset: int) -> bytes:
+    """Assemble the same patch-site B/BL with the cross-assembler."""
+    definition = _HEAD_WRAPPER_BY_SITE.get(site)
+    if definition is None or definition["offset"] != wrapper_offset:
+        raise SystemExit(f"ERROR: unknown head wrapper patch site 0x{site:x}")
+    mnemonic = "bl" if site in _HEAD_WRAPPER_CALL_SITES else "b"
+    target = HEAD_WRAPPER_CAVE_ADDR + wrapper_offset
+    asm = f"""\
+    .syntax unified
+    .arm
+    .text
+    .global _start
+_start:
+    {mnemonic}     0x{target:08x}
+"""
+    blob = assemble_linked_probe(asm, DECOMPRESSED_BASE + site, 4,
+                                 f"head wrapper patch 0x{site:x}")
+    if blob != HEAD_WRAPPER_PATCH_EXPECTED[site]:
+        raise SystemExit(f"ERROR: assembled head wrapper patch changed at 0x{site:x}")
+    return blob
+
+
+def _head_cave_targets() -> range:
+    return range(HEAD_WRAPPER_CAVE_ADDR,
+                 HEAD_WRAPPER_CAVE_ADDR + HEAD_WRAPPER_CAVE_SIZE, 4)
+
+
+def head_wrapper_cave_branch_sources(raw: bytes) -> list[int]:
+    """Return aligned stock ARM B/BL sites that target the wrapper cave."""
+    sources: list[int] = []
+    lo = HEAD_WRAPPER_CAVE_ADDR
+    hi = HEAD_WRAPPER_CAVE_ADDR + HEAD_WRAPPER_CAVE_SIZE
+    for offset in range(0, len(raw) - 3, 4):
+        word = struct.unpack_from("<I", raw, offset)[0]
+        if ((word >> 28) & 0xF) == 0xF or ((word >> 25) & 0x7) != 0x5:
+            continue
+        displacement = word & 0xFFFFFF
+        if displacement & 0x800000:
+            displacement -= 1 << 24
+        destination = (DECOMPRESSED_BASE + offset + 8 + (displacement << 2)) & 0xFFFFFFFF
+        if lo <= destination < hi:
+            sources.append(DECOMPRESSED_BASE + offset)
+    return sources
+
+
+def head_wrapper_cave_literal_pointers(raw: bytes) -> list[int]:
+    """Return offsets whose little-endian word points into the wrapper cave."""
+    pointers: list[int] = []
+    lo = HEAD_WRAPPER_CAVE_ADDR
+    hi = HEAD_WRAPPER_CAVE_ADDR + HEAD_WRAPPER_CAVE_SIZE
+    for offset in range(0, len(raw) - 3, 4):
+        value = struct.unpack_from("<I", raw, offset)[0]
+        if lo <= value < hi:
+            pointers.append(DECOMPRESSED_BASE + offset)
+    return pointers
+
+
 def decompress_kernel_image(zimage: bytes) -> bytes:
     """Return the first gzip member's decompressed ARM Image."""
     offset = zimage.find(b"\x1f\x8b\x08")
@@ -226,7 +459,7 @@ def decompress_kernel_image(zimage: bytes) -> bytes:
 
 
 def install_head_entry_probe(zimage: bytes) -> tuple[bytes, HeadProbeMetadata]:
-    """Install semantics-preserving H/I markers without changing geometry."""
+    """Install semantics-preserving early-head markers without changing geometry."""
     offset = zimage.find(b"\x1f\x8b\x08")
     if offset != KERNEL_GZIP_OFFSET:
         raise SystemExit(f"ERROR: kernel gzip offset is 0x{offset:x}")
@@ -244,13 +477,33 @@ def install_head_entry_probe(zimage: bytes) -> tuple[bytes, HeadProbeMetadata]:
     cave_end = HEAD_TRAMPOLINE_OFF + HEAD_TRAMPOLINE_SIZE
     if bytes(raw[HEAD_TRAMPOLINE_OFF:cave_end]) != HEAD_CAVE_STOCK:
         raise SystemExit("ERROR: decompressed head.S NOP-cave contract changed")
+    wrapper_end = HEAD_WRAPPER_CAVE_OFF + HEAD_WRAPPER_CAVE_SIZE
+    if bytes(raw[HEAD_WRAPPER_CAVE_OFF:wrapper_end]) != HEAD_WRAPPER_STOCK:
+        raise SystemExit("ERROR: decompressed expanded-wrapper cave is not stock zero padding")
+    if head_wrapper_cave_branch_sources(bytes(raw)):
+        raise SystemExit("ERROR: stock decompressed Image directly branches into wrapper cave")
+    if head_wrapper_cave_literal_pointers(bytes(raw)):
+        raise SystemExit("ERROR: stock decompressed Image contains a pointer into wrapper cave")
+    for site, _ in HEAD_WRAPPER_PATCH_SITES:
+        definition = _HEAD_WRAPPER_BY_SITE[site]
+        expected = bytes.fromhex(definition["stock"])
+        if bytes(raw[site:site + 4]) != expected:
+            raise SystemExit(f"ERROR: head.S wrapper stock word changed at 0x{site:x}")
 
     head_branch = assemble_head_entry_branch()
     head_trampoline = assemble_head_trampoline()
+    head_wrappers = assemble_head_wrappers()
     if head_branch != HEAD_ENTRY_BRANCH:
         raise SystemExit("ERROR: head entry branch assembly changed")
     raw[:len(head_branch)] = head_branch
     raw[HEAD_TRAMPOLINE_OFF:cave_end] = head_trampoline
+    raw[HEAD_WRAPPER_CAVE_OFF:wrapper_end] = head_wrappers
+    for site, wrapper_offset in HEAD_WRAPPER_PATCH_SITES:
+        patch_word = head_wrapper_patch_word(site, wrapper_offset)
+        assembled = assemble_head_wrapper_patch(site, wrapper_offset)
+        if patch_word != assembled:
+            raise SystemExit(f"ERROR: head wrapper patch encoding changed at 0x{site:x}")
+        raw[site:site + 4] = patch_word
     header = zimage[offset:offset + 10]
     if len(header) != 10 or header[:3] != b"\x1f\x8b\x08" or header[3] != 0:
         raise SystemExit("ERROR: unsupported stock gzip header")
@@ -259,7 +512,7 @@ def install_head_entry_probe(zimage: bytes) -> tuple[bytes, HeadProbeMetadata]:
     new_stream = header + deflate + struct.pack(
         "<II", binascii.crc32(raw) & 0xFFFFFFFF, len(raw) & 0xFFFFFFFF)
     if len(new_stream) > consumed:
-        raise SystemExit("ERROR: H-probed kernel no longer fits stock gzip envelope")
+        raise SystemExit("ERROR: expanded-head-probed kernel no longer fits stock gzip envelope")
 
     # head.S uses input_data_end - 4 as an out-of-band inflated-size word for
     # overlap/self-relocation decisions. A shorter gzip member may leave slack,
@@ -267,13 +520,13 @@ def install_head_entry_probe(zimage: bytes) -> tuple[bytes, HeadProbeMetadata]:
     # this word makes r9=0 and lets decompression overwrite its own stack.
     slack = consumed - len(new_stream)
     if slack < 4:
-        raise SystemExit("ERROR: H-probed gzip has no room for terminal size word")
+        raise SystemExit("ERROR: expanded-head gzip has no room for terminal size word")
     envelope = (new_stream + b"\0" * (slack - 4) +
                 struct.pack("<I", len(raw)))
     result = bytearray(zimage)
     result[offset:offset + consumed] = envelope
     metadata: HeadProbeMetadata = {
-        "marker": "HI",
+        "marker": HEAD_MARKER_SEQUENCE,
         "raw_head": bytes(raw[:len(head_branch)]),
         "old_stream_size": consumed,
         "new_stream_size": len(new_stream),
