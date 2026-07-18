@@ -52,17 +52,46 @@ _start:
     str     r12, [r3]
 """
 
+# Decompression-completion probe. The stock zImage finishes decompression in
+# __enter_kernel with "mov r0, #0; mov pc, r4" at offsets 0x920/0x924, followed
+# by a 6-NOP sled (0x928-0x93f). The mov pc, r4 word (e1a0f004) is unique in
+# the whole zImage and reached only by fall-through from 0x920, so it can be
+# redirected into the sled. The sled writes 'D' to the UART and continues with
+# bx r4 into the decompressed kernel. No THRE poll: the UART has been idle for
+# seconds by then, and a poll loop would not fit in six words. Clobbers only
+# r3/r12; preserves the kernel ABI registers and r4 (entry target). The code
+# is position-independent because the zImage executes from its self-relocated
+# copy at this point.
+DEJUMP_NOP = struct.pack("<I", 0xE320F000)
+DEJUMP_OFF = 0x924
+DEJUMP_MOV_PC_R4 = 0xE1A0F004
+DEJUMP_BRANCH = 0xEAFFFFFF  # from 0x924: branches to the next word (the sled)
+DEJUMP_SLED_OFF = 0x928
+DEJUMP_SLED_SIZE = 6
+DEJUMP_PROBE_ASM = """\
+    .syntax unified
+    .arm
+    .text
+    .global _start
+_start:
+    movw    r3, #0x2000
+    movt    r3, #0x1100      @ r3 = UART THR (0x11002000)
+    mov     r12, #'D'
+    str     r12, [r3]
+    bx      r4               @ continue into the decompressed kernel
+"""
+
 
 def align(value: int, alignment: int) -> int:
     return (value + alignment - 1) & ~(alignment - 1)
 
 
-def assemble_entry_probe() -> bytes:
+def assemble_probe(asm: str, expected_size: int, name: str) -> bytes:
     with tempfile.TemporaryDirectory() as td:
         src = Path(td) / "probe.s"
         obj = Path(td) / "probe.o"
         raw = Path(td) / "probe.bin"
-        src.write_text(ENTRY_PROBE_ASM)
+        src.write_text(asm)
         subprocess.run(
             ["arm-none-eabi-as", "-march=armv7-a", "-o", str(obj), str(src)],
             check=True)
@@ -71,10 +100,21 @@ def assemble_entry_probe() -> bytes:
              str(obj), str(raw)],
             check=True)
         blob = raw.read_bytes()
-    if len(blob) != 0x20:
+    if len(blob) != expected_size:
         raise SystemExit(
-            f"ERROR: entry probe is 0x{len(blob):x} bytes, expected 0x20")
+            f"ERROR: {name} probe is 0x{len(blob):x} bytes, "
+            f"expected 0x{expected_size:x}")
     return blob
+
+
+def assemble_entry_probe() -> bytes:
+    return assemble_probe(ENTRY_PROBE_ASM, 0x20, "entry")
+
+
+def assemble_dejump_probe() -> bytes:
+    # 5 of the 6 sled words; the last word must stay a NOP.
+    return assemble_probe(DEJUMP_PROBE_ASM, (DEJUMP_SLED_SIZE - 1) * 4,
+                          "decompression")
 
 
 def android_id(kernel: bytes, ramdisk: bytes, second: bytes, dt: bytes) -> bytes:
@@ -131,6 +171,25 @@ def build(source: Path, output: Path) -> None:
     if struct.unpack_from("<I", payload, 0x20)[0] != ENTRY_BRANCH:
         raise SystemExit("ERROR: entry probe clobbered the zImage branch")
 
+    # Decompression-completion probe: redirect the unique __enter_kernel
+    # "mov pc, r4" into the following NOP sled and place the 'D' marker there.
+    if struct.unpack_from("<I", payload, DEJUMP_OFF - 4)[0] != 0xE3A00000:
+        raise SystemExit("ERROR: __enter_kernel mov r0,#0 contract failed")
+    if struct.unpack_from("<I", payload, DEJUMP_OFF)[0] != DEJUMP_MOV_PC_R4:
+        raise SystemExit("ERROR: __enter_kernel mov pc,r4 contract failed")
+    if payload.count(struct.pack("<I", DEJUMP_MOV_PC_R4)) != 1:
+        raise SystemExit("ERROR: mov pc,r4 is not unique in the zImage")
+    sled_end = DEJUMP_SLED_OFF + DEJUMP_SLED_SIZE * 4
+    if payload[DEJUMP_SLED_OFF:sled_end] != DEJUMP_NOP * DEJUMP_SLED_SIZE:
+        raise SystemExit("ERROR: __enter_kernel NOP sled contract failed")
+    dprobe = assemble_dejump_probe()
+    payload = bytearray(payload)
+    struct.pack_into("<I", payload, DEJUMP_OFF, DEJUMP_BRANCH)
+    payload[DEJUMP_SLED_OFF:DEJUMP_SLED_OFF + len(dprobe)] = dprobe
+    payload = bytes(payload)
+    if payload[sled_end - 4:sled_end] != DEJUMP_NOP:
+        raise SystemExit("ERROR: decompression probe overran the NOP sled")
+
     evt = payload[EVT_OFFSET:EVT_OFFSET + EVT_SIZE]
     evt_hash = hashlib.sha256(evt).hexdigest()
     if len(evt) != EVT_SIZE or evt_hash != EVT_SHA256:
@@ -177,6 +236,8 @@ def build(source: Path, output: Path) -> None:
     print(f"native_k32_boot={output}")
     print(f"kernel_addr=0x{kernel_addr:08x} kernel_size=0x{len(new_kernel):x}")
     print("zimage_probe=" + " ".join(f"{w:08x}" for w in struct.unpack("<8I", probe)))
+    print("zimage_dejump=" + " ".join(
+        f"{w:08x}" for w in struct.unpack("<6I", payload[DEJUMP_OFF:DEJUMP_OFF + 0x18])))
     print(f"zimage_size=0x{ZIMAGE_END:x} evt_offset=0x{ZIMAGE_END:x} evt_size=0x{EVT_PADDED_SIZE:x} evt_raw_size=0x{EVT_SIZE:x}")
     print(f"evt_sha256={EVT_SHA256}")
     print(f"image_sha256={hashlib.sha256(result).hexdigest()}")

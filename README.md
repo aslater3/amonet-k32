@@ -116,6 +116,21 @@ at `+0x20`. Interpretation:
 - `K` appears but no kernel output follows → the CPU entered the zImage and
   the failure is inside zImage startup, relocation, or decompression.
 
+The builder also patches the stock decompressor return at zImage offset
+`0x924` (the unique `mov pc,r4`) to branch into the following six-word ARM NOP
+sled. Five sled words are replaced by a position-independent probe that writes
+`D` to `0x11002000` and executes `bx r4`; the final NOP remains as an overrun
+sentinel. This preserves the decompressed-kernel target in `r4` and separates
+an entry/cache/relocation failure from a failure after decompression:
+
+- `K` but no `D` → failure before the decompressor's final return, including
+  cache/MMU setup, decompressor relocation, or gzip decompression.
+- `D` → the decompressor reached its return path and branched to the
+  uncompressed kernel entry; any remaining silence is after decompression.
+
+The `D` probe is assembled at build time and the verifier checks the exact
+branch, five probe words, and trailing NOP sentinel.
+
 This directory is its own Git repository and contains the patched Amonet
 source (`lk-payload/`), BROM injector source (`brom-payload/` and `modules/`),
 exact firmware inputs, generated artifacts, deployment scripts and the

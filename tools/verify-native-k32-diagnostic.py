@@ -21,7 +21,7 @@ EVT_SHA256 = "f44630ba28f503dd7503bc7cffa2ee96a319acf2f58f1456bb6f5ff23d57dee1"
 
 EXPECTED = {
     "lk.bin": "5cb92494340417b1e5d18c3eaa34844dbcfec2cc8086451f087867cd06b15472",
-    "boot-k32-native-evt.img": "1fe75af0428a6fbd9566505bb084af23e7e00c16c11ed0c6e19a95349c2e22c1",
+    "boot-k32-native-evt.img": "b7764a69ca00a3c38b80c09dfc1e6d644fd3510771c378df6ac47c91dd08afc4",
     "boot-k32-native-diag.hdr": "dbbff7eeb8830c0d6cde454a97dc31be73d1cba32e6be9b21fe3c7be2b659066",
     "boot-k32-native-diag.payload": "be910c9f87a8c53e7f870617d1711c87cf72151af46eae93bb773e4a5a38df65",
     "boot-k32-native-diag-wrapper.full.img": "0cede4610e83662da83b7d2ad1df20c79d3bf080c8bd74fca9817dbe31b1466a",
@@ -38,6 +38,13 @@ ENTRY_PROBE = bytes.fromhex(
     "143002e3" "003141e3" "00c093e5" "20001ce3"
     "fcffff0a" "143043e2" "4bc0a0e3" "00c083e5")
 ENTRY_BRANCH = struct.pack("<I", 0xEA000003)
+DEJUMP_OFF = 0x924
+DEJUMP_BRANCH = struct.pack("<I", 0xEAFFFFFF)
+DEJUMP_SLED_OFF = 0x928
+DEJUMP_SLED_SIZE = 6
+DEJUMP_NOP = struct.pack("<I", 0xE320F000)
+DEJUMP_PROBE = bytes.fromhex(
+    "003002e3" "003141e3" "44c0a0e3" "00c083e5" "14ff2fe1")
 
 FDT_CALLS = {
     0x4BD33206: (0xF007, 0xFFC3),
@@ -136,6 +143,15 @@ def verify_boot_image(image: bytes) -> None:
     require(payload[0x20:0x24] == ENTRY_BRANCH, "zImage entry branch clobbered")
     require(payload[0x24:0x28] == bytes.fromhex("18286f01"), "ARM zImage magic missing")
     require(struct.unpack_from("<II", payload, 0x28) == (0, ZIMAGE_END), "ARM zImage range changed")
+    require(payload[DEJUMP_OFF - 4:DEJUMP_OFF] == bytes.fromhex("0000a0e3"),
+            "decompression pre-return instruction changed")
+    require(payload[DEJUMP_OFF:DEJUMP_OFF + 4] == DEJUMP_BRANCH,
+            "decompression return branch missing")
+    sled_end = DEJUMP_SLED_OFF + DEJUMP_SLED_SIZE * 4
+    require(payload[DEJUMP_SLED_OFF:DEJUMP_SLED_OFF + len(DEJUMP_PROBE)] == DEJUMP_PROBE,
+            "decompression D probe mismatch")
+    require(payload[sled_end - 4:sled_end] == DEJUMP_NOP,
+            "decompression D probe sled overrun")
     evt = payload[ZIMAGE_END:]
     require(len(evt) == EVT_PADDED_SIZE, "padded EVT DTB size mismatch")
     raw_evt = bytearray(evt[:EVT_SIZE])
@@ -253,6 +269,7 @@ def main() -> None:
     print("fdt_diagnostic_contract=PASS setprop_calls=15 M3=0x4BD33888 M4=0x4BD33DC0")
     print("k32_jump_contract=PASS stub=0x4BD33BCA stock=990c:4632 log=regs+cpu+zimg+fdt+initrd")
     print("zimage_probe_contract=PASS entry=0x40008000 marker=K clobbers=r3,r12")
+    print("zimage_dejump_contract=PASS return=0x924 marker=D target=r4")
     print("wrapper_sparse_contract=PASS block=223215 logical=110MiB")
 
 
