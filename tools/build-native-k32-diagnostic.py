@@ -41,6 +41,7 @@ EVT_SHA256 = "f44630ba28f503dd7503bc7cffa2ee96a319acf2f58f1456bb6f5ff23d57dee1"
 # envelope, and zero-pads any saved bytes so no zImage/DTB offsets move.
 KERNEL_GZIP_OFFSET = 0x46D8
 KERNEL_GZIP_SIZE = 0x5741FB
+KERNEL_GZIP_END = KERNEL_GZIP_OFFSET + KERNEL_GZIP_SIZE
 DECOMPRESSED_KERNEL_SIZE = 0xB86070
 STOCK_DECOMPRESSED_SHA256 = "3eac3f3daf9daa04f1b67e78c3f2b1ead9a74d64aae435ef5f1988916d31cbd2"
 STOCK_DECOMPRESSED_HEAD = bytes.fromhex(
@@ -177,8 +178,17 @@ def install_head_entry_probe(zimage: bytes) -> tuple[bytes, HeadProbeMetadata]:
     if len(new_stream) > consumed:
         raise SystemExit("ERROR: H-probed kernel no longer fits stock gzip envelope")
 
+    # head.S uses input_data_end - 4 as an out-of-band inflated-size word for
+    # overlap/self-relocation decisions. A shorter gzip member may leave slack,
+    # but the fixed envelope must still end in the original Image size. Zeroing
+    # this word makes r9=0 and lets decompression overwrite its own stack.
+    slack = consumed - len(new_stream)
+    if slack < 4:
+        raise SystemExit("ERROR: H-probed gzip has no room for terminal size word")
+    envelope = (new_stream + b"\0" * (slack - 4) +
+                struct.pack("<I", len(raw)))
     result = bytearray(zimage)
-    result[offset:offset + consumed] = new_stream + b"\0" * (consumed - len(new_stream))
+    result[offset:offset + consumed] = envelope
     metadata: HeadProbeMetadata = {
         "marker": "H",
         "raw_head": bytes(raw[:8]),

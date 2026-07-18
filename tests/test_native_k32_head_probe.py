@@ -28,6 +28,8 @@ class HeadEntryProbeTest(unittest.TestCase):
         self.assertEqual(metadata["marker"], "H")
         self.assertEqual(metadata["raw_head"], BUILDER.HEAD_ENTRY_PROBE)
         self.assertLessEqual(metadata["new_stream_size"], metadata["old_stream_size"])
+        self.assertEqual(patched[BUILDER.KERNEL_GZIP_END - 4:BUILDER.KERNEL_GZIP_END],
+                         struct.pack("<I", BUILDER.DECOMPRESSED_KERNEL_SIZE))
         self.assertEqual(patched[BUILDER.ZIMAGE_END - 0x3D:],
                          stock_zimage[BUILDER.ZIMAGE_END - 0x3D:])
 

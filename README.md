@@ -125,8 +125,11 @@ UART THR address and an `H` byte into the decompressed image, moves the displace
 Inside the gzip member, the builder changes only the first two decompressed
 kernel words: the first writes `H`; the second is the original
 `bl __hyp_stub_install` retargeted for its four-byte displacement. The kernel is
-recompressed into the exact original `0x5741fb`-byte envelope and any saved
-space is zero-padded, so the zImage end and EVT offset do not move. Interpretation:
+recompressed into the exact original `0x5741fb`-byte envelope. Saved space is
+zero-filled except for the mandatory final little-endian `0x00b86070` inflated-
+size word consumed by `head.S` at `input_data_end - 4`; retaining that word is
+required for safe decompressor self-relocation. The zImage end and EVT offset do
+not move. Interpretation:
 
 - `K` but no `D` → failure before the decompressor's final return, including
   cache/MMU setup, decompressor relocation, or gzip decompression.

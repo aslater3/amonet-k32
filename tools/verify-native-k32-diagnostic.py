@@ -29,7 +29,7 @@ STOCK_DECOMPRESSED_SHA256 = "3eac3f3daf9daa04f1b67e78c3f2b1ead9a74d64aae435ef5f1
 
 EXPECTED = {
     "lk.bin": "5cb92494340417b1e5d18c3eaa34844dbcfec2cc8086451f087867cd06b15472",
-    "boot-k32-native-evt.img": "c119decd195e1f25525466e8ba82706b4e8276826b34fc9bcaf08b732a4addba",
+    "boot-k32-native-evt.img": "5a470a04c9711b7d2588fb7992a19742b15c55d3bbde644231cf939cab6319a9",
     "boot-k32-native-diag.hdr": "dbbff7eeb8830c0d6cde454a97dc31be73d1cba32e6be9b21fe3c7be2b659066",
     "boot-k32-native-diag.payload": "e885a546af1f896a73ac34224abb98482509f59ae3d70eae2ac4ed0f264d6e74",
     "boot-k32-native-diag-wrapper.full.img": "0c264f23f0ba043ef316f170ffa9fdcf90ec0835b92af8adbf1891607985aa4d",
@@ -178,9 +178,14 @@ def verify_boot_image(image: bytes) -> None:
     require(raw[8:] == stock_raw[8:],
             "H-probed decompressed kernel differs from stock beyond bytes 0..7")
     gzip_pad_start = KERNEL_GZIP_OFFSET + consumed
-    gzip_pad_end = KERNEL_GZIP_OFFSET + KERNEL_GZIP_SIZE
-    require(payload[gzip_pad_start:gzip_pad_end] == b"\0" * (gzip_pad_end - gzip_pad_start),
-            "H-probed gzip envelope padding is not zero-filled")
+    gzip_envelope_end = KERNEL_GZIP_OFFSET + KERNEL_GZIP_SIZE
+    gzip_size_word = gzip_envelope_end - 4
+    require(payload[gzip_pad_start:gzip_size_word] ==
+            b"\0" * (gzip_size_word - gzip_pad_start),
+            "H-probed gzip envelope slack is not zero-filled")
+    require(struct.unpack_from("<I", payload, gzip_size_word)[0] ==
+            DECOMPRESSED_KERNEL_SIZE,
+            "head.S input_data_end-4 inflated-size contract changed")
     evt = payload[ZIMAGE_END:]
     require(len(evt) == EVT_PADDED_SIZE, "padded EVT DTB size mismatch")
     raw_evt = bytearray(evt[:EVT_SIZE])
@@ -307,7 +312,8 @@ def main() -> None:
     print("k32_jump_contract=PASS stub=0x4BD33BCA stock=990c:4632 log=regs+cpu+zimg+fdt+initrd")
     print("zimage_probe_contract=PASS entry=0x40008000 marker=K clobbers=r3,r12")
     print("zimage_dejump_contract=PASS return=0x924 markers=D,H target=r4")
-    print("kernel_head_probe_contract=PASS entry=0x40008000 marker=H gzip_fixed=0x5741FB")
+    print("kernel_head_probe_contract=PASS entry=0x40008000 marker=H "
+          "gzip_fixed=0x5741FB terminal_size=0x00B86070")
     print("atf_crash_contract=PASS range=0x5F800000-0x5FA00000 max=0x20000")
     print("wrapper_sparse_contract=PASS block=223215 logical=110MiB")
 
