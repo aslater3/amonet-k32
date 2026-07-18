@@ -36,7 +36,7 @@ static uint32_t g_initrd_start, g_initrd_end;
  * Dump it before LK/device setup can reuse the retained logging area. */
 #define ATF_CTL_BASE  0x5F800000U
 #define ATF_CTL_LIMIT 0x5FA00000U
-#define ATF_CRASH_MAX 0x4000U
+#define ATF_CRASH_MAX 0x20000U
 
 static void dump_previous_atf_crash(void)
 {

@@ -134,8 +134,10 @@ branch, five probe words, and trailing NOP sentinel.
 Before GPT parsing, the payload also inspects the retained MediaTek ATF crash
 control block at `0x5F800000`: indices 14, 15, and 16 provide the crash-buffer
 address, size, and flag. It prints `ATFCR flag=... addr=... size=...`, rejects
-anything outside `0x5F800000–0x5FA00000` or larger than `0x4000`, and replaces
-non-printable bytes with `.` while dumping the bounded record. This is
+anything outside `0x5F800000–0x5FA00000` or larger than `0x20000`, and replaces
+non-printable bytes with `.` while dumping the bounded record. The `0x20000`
+limit matches the retained crash-buffer capacity observed on Radar/Puffin: the
+record at `0x5F9DC000` ends exactly at the ATF AEE boundary `0x5F9FC000`. This is
 read-only and runs before normal LK/device setup:
 
 ```text

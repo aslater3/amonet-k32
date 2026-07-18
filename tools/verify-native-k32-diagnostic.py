@@ -13,7 +13,7 @@ LK_BASE = 0x4BD00000
 LK_HEADER_SIZE = 0x200
 PAYLOAD_BLOCK = 223215
 RAW_PAYLOAD_OFFSET = 576
-RAW_PAYLOAD_SIZE = 0x18C8
+RAW_PAYLOAD_SIZE = 0x18E4
 ZIMAGE_END = 0x578910
 EVT_SIZE = 0xC875
 EVT_PADDED_SIZE = 0x10000  # totalsize inflated + zero-padded: libfdt needs slack for fixups
@@ -23,11 +23,11 @@ EXPECTED = {
     "lk.bin": "5cb92494340417b1e5d18c3eaa34844dbcfec2cc8086451f087867cd06b15472",
     "boot-k32-native-evt.img": "b7764a69ca00a3c38b80c09dfc1e6d644fd3510771c378df6ac47c91dd08afc4",
     "boot-k32-native-diag.hdr": "dbbff7eeb8830c0d6cde454a97dc31be73d1cba32e6be9b21fe3c7be2b659066",
-    "boot-k32-native-diag.payload": "5b745ee659f9d920954f25a722bbb0fdfffb3c4efb1a5bb85787088e53cd040a",
-    "boot-k32-native-diag-wrapper.full.img": "b8ac912b8d7811df4e708cf54f25fd85935a23f383c4a7d0e4ca19283619be65",
-    "boot-k32-native-diag-wrapper.sparse.img": "f83a9b783f89e6d6ff2eb24b1691c6e5f33281f18527ddddf6c3f0832584861f",
+    "boot-k32-native-diag.payload": "e885a546af1f896a73ac34224abb98482509f59ae3d70eae2ac4ed0f264d6e74",
+    "boot-k32-native-diag-wrapper.full.img": "0c264f23f0ba043ef316f170ffa9fdcf90ec0835b92af8adbf1891607985aa4d",
+    "boot-k32-native-diag-wrapper.sparse.img": "5e9b11b4dce22b77873985b7c50cf2de6b6a12b6a81ec9b7ac295eb25f840c23",
 }
-RAW_PAYLOAD_SHA256 = "9d4202f5046263a77de8cfb67a70efc7548bd2c854818226077109ea9bcc9669"
+RAW_PAYLOAD_SHA256 = "0eee04f0358d447fe22ee37645b0ce0218cb3e067375b4241d19b391a02f1476"
 
 # Assembled by tools/build-native-k32-diagnostic.py (arm-none-eabi-as
 # -march=armv7-a). Replaces the stock 8-NOP sled at the zImage entry; writes
@@ -246,6 +246,10 @@ def main() -> None:
     require("*patch32 = 0;" in added_source, "source patch does not clear cached selector")
     require("if (!fastboot) {" in added_source,
             "K32 image loading is not guarded against fastboot fallback")
+    require("#define ATF_CRASH_MAX 0x20000U" in added_source,
+            "ATF crash-record bound does not accept the observed 0x20000-byte buffer")
+    require("addr > ATF_CTL_LIMIT - size" in added_source,
+            "ATF crash-record end bound is missing")
     require("dev->read(dev, g_misc * 0x200, bootloader_msg, 0x20, USER_PART);" in added_source,
             "misc bootloader message does not read UART_PLEASE half")
     selector_writes = [
@@ -274,6 +278,7 @@ def main() -> None:
     print("k32_jump_contract=PASS stub=0x4BD33BCA stock=990c:4632 log=regs+cpu+zimg+fdt+initrd")
     print("zimage_probe_contract=PASS entry=0x40008000 marker=K clobbers=r3,r12")
     print("zimage_dejump_contract=PASS return=0x924 marker=D target=r4")
+    print("atf_crash_contract=PASS range=0x5F800000-0x5FA00000 max=0x20000")
     print("wrapper_sparse_contract=PASS block=223215 logical=110MiB")
 
 
