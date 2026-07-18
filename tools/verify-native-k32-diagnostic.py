@@ -23,11 +23,11 @@ EXPECTED = {
     "lk.bin": "5cb92494340417b1e5d18c3eaa34844dbcfec2cc8086451f087867cd06b15472",
     "boot-k32-native-evt.img": "b7764a69ca00a3c38b80c09dfc1e6d644fd3510771c378df6ac47c91dd08afc4",
     "boot-k32-native-diag.hdr": "dbbff7eeb8830c0d6cde454a97dc31be73d1cba32e6be9b21fe3c7be2b659066",
-    "boot-k32-native-diag.payload": "b47162befbfd352451214609854bd5ff283a987e6de695ac648ee474984decbf",
-    "boot-k32-native-diag-wrapper.full.img": "cab8811ef5bfb42814cf0e2fd2c7df7eedce3cb7f644b5b3f8a7455b4e59c0bd",
-    "boot-k32-native-diag-wrapper.sparse.img": "39019775bf83ccf14d576ad54aa7005ee1802733a1dcf51f92c222a381f68552",
+    "boot-k32-native-diag.payload": "5b745ee659f9d920954f25a722bbb0fdfffb3c4efb1a5bb85787088e53cd040a",
+    "boot-k32-native-diag-wrapper.full.img": "b8ac912b8d7811df4e708cf54f25fd85935a23f383c4a7d0e4ca19283619be65",
+    "boot-k32-native-diag-wrapper.sparse.img": "f83a9b783f89e6d6ff2eb24b1691c6e5f33281f18527ddddf6c3f0832584861f",
 }
-RAW_PAYLOAD_SHA256 = "e9089cf6be7094906691a81bcbe2f89516f2662aad79e3635c7cf6acad85dcc2"
+RAW_PAYLOAD_SHA256 = "9d4202f5046263a77de8cfb67a70efc7548bd2c854818226077109ea9bcc9669"
 
 # Assembled by tools/build-native-k32-diagnostic.py (arm-none-eabi-as
 # -march=armv7-a). Replaces the stock 8-NOP sled at the zImage entry; writes
@@ -217,7 +217,7 @@ def main() -> None:
     raw_payload = payload[RAW_PAYLOAD_OFFSET:RAW_PAYLOAD_OFFSET + RAW_PAYLOAD_SIZE]
     require(digest(raw_payload) == RAW_PAYLOAD_SHA256, "embedded compiled payload hash mismatch")
     for marker in (
-        b"Biscuit native K32 EVT diagnostic",
+        b"Radar/Puffin native K32 diagnostic (Biscuit-derived Amonet)",
         b"ABI handoff: native K32 loader + stock ARM32 jump",
         b"FDT setprop name=%s ret=%x len=%x fdt=%x node=%x",
         b"FDT magic=%x total=%x",

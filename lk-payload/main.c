@@ -444,7 +444,7 @@ int main() {
     uint32_t *patch32;
 
     printf("This is LK-payload by xyz. Copyright 2019\n");
-    printf("Biscuit native K32 EVT diagnostic by k4y0z and R0rt1z2. Copyright 2020-2026\n");
+    printf("Radar/Puffin native K32 diagnostic (Biscuit-derived Amonet) by k4y0z and R0rt1z2. Copyright 2020-2026\n");
 
     dump_previous_atf_crash();
     parse_gpt();

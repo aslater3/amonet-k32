@@ -18,7 +18,7 @@ declare -A expected=(
   [bin/lk.bin]=5cb92494340417b1e5d18c3eaa34844dbcfec2cc8086451f087867cd06b15472
   [modules/main.py]=f6afc444a8ef7cc28ec6d9803b57d52c4ff66a1946afea36853295a83ce73cf9
   [bin/boot-k32-native-diag.hdr]=dbbff7eeb8830c0d6cde454a97dc31be73d1cba32e6be9b21fe3c7be2b659066
-  [bin/boot-k32-native-diag.payload]=b47162befbfd352451214609854bd5ff283a987e6de695ac648ee474984decbf
+  [bin/boot-k32-native-diag.payload]=5b745ee659f9d920954f25a722bbb0fdfffb3c4efb1a5bb85787088e53cd040a
 )
 
 for path in "${!expected[@]}"; do
