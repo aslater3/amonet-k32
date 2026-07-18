@@ -146,6 +146,13 @@ Fix: the builder inflates the appended EVT blob's `fdt_totalsize` to
 runtime fixups. The raw DTB content (first `0xC875` bytes, SHA pinned) is
 unchanged; `hw_code` stays at offset `0x24`.
 
+The payload reads the full 0x20-byte misc bootloader message so the optional
+`UART_PLEASE` marker at offset `0x10` is reachable. When fastboot is requested
+by the action key, boot mode, or a one-shot marker, the payload prepares
+fastboot and deliberately skips the K32 image read hook, inner boot-header
+validation, selector change, and FDT/jump diagnostics. Thus a damaged/missing
+GPT or `boot_a_x` cannot turn the recovery path into a K32 diagnostic halt.
+
 ## Artifacts
 
 - `bin/boot-k32-native-evt.img` — 16 MiB ARM32 boot image, sole EVT DTB with

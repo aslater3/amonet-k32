@@ -229,11 +229,11 @@ void set_led_ring(uint8_t colors[12][3]) {
     static uint8_t frame[36];
     for (int i = 0; i < 12; i++) {
         frame[i*3] = colors[i][0];
-        frame[i*3+1] = colors[i][1]; 
+        frame[i*3+1] = colors[i][1];
         frame[i*3+2] = colors[i][2];
     }
     led_update(1, frame);
-    led_write(0x25, 0); 
+    led_write(0x25, 0);
 }
 
 void* led_animation_thread(void* arg) {
@@ -475,7 +475,7 @@ int main() {
 
     if (g_misc) {
       uint8_t bootloader_msg[0x20] = { 0 };
-      dev->read(dev, g_misc * 0x200, bootloader_msg, 0x10, USER_PART);
+      dev->read(dev, g_misc * 0x200, bootloader_msg, 0x20, USER_PART);
       printf("Read bootloader_msg: %s\n", bootloader_msg);
 
       if (strncmp(bootloader_msg, "boot-amonet", 11) == 0) {
@@ -524,20 +524,21 @@ int main() {
     *patch++ = 0x2000; // movs r0, #0
     *patch = 0x4770;   // bx lr
 
-    // Hook bootimg read function
-    original_read = (void*)dev->read;
-    patch32 = (void*)0x4BD57670;
-    *patch32 = (uint32_t)read_func;
+    if (!fastboot) {
+      // Hook bootimg read function
+      original_read = (void*)dev->read;
+      patch32 = (void*)0x4BD57670;
+      *patch32 = (uint32_t)read_func;
 
-    patch32 = (void*)&dev->read;
-    *patch32 = (uint32_t)read_func;
+      patch32 = (void*)&dev->read;
+      *patch32 = (uint32_t)read_func;
 
-    // Keep LK's native ARM32 image-processing and final handoff path.  The
-    // preloader/ATF have already consumed the live boot option, which remains
-    // untouched; only LK's cached image selector is corrected here.
-    uint8_t *hdr = (uint8_t *)PAYLOAD_DST;
-    original_read(dev, (g_boot_a_x) * 0x200, hdr, 0x800, USER_PART);
-    if (memcmp(hdr, "ANDROID!", 8) == 0) {
+      // Keep LK's native ARM32 image-processing and final handoff path.  The
+      // preloader/ATF have already consumed the live boot option, which remains
+      // untouched; only LK's cached image selector is corrected here.
+      uint8_t *hdr = (uint8_t *)PAYLOAD_DST;
+      original_read(dev, (g_boot_a_x) * 0x200, hdr, 0x800, USER_PART);
+      if (memcmp(hdr, "ANDROID!", 8) == 0) {
         uint32_t **boot_arg_ptr = (void *)0x4BD664E0;
         uint32_t *boot_arg = *boot_arg_ptr;
 
@@ -560,9 +561,10 @@ int main() {
 
         printf("ABI handoff: native K32 loader + stock ARM32 jump bootopt=%u cached=%u opcode=%04x %04x %04x\n",
                boot_arg[0x53], *patch32, selector[0], selector[1], selector[2]);
-    } else {
+      } else {
         printf("ABI handoff failed: inner boot header missing\n");
         while (1) {}
+      }
     }
 
     // Accomodate the max download size
@@ -573,7 +575,7 @@ int main() {
     cache_clean((void *)LK_BASE, LK_SIZE);
 
     // Drain UART TX before re-entering LK so the ABI diag/Clean messages
-    // are not lost when the UART controller resets during the transition. 
+    // are not lost when the UART controller resets during the transition.
     mdelay(100);
 
     restart_lk((void *)app);

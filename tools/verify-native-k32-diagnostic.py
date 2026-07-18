@@ -13,7 +13,7 @@ LK_BASE = 0x4BD00000
 LK_HEADER_SIZE = 0x200
 PAYLOAD_BLOCK = 223215
 RAW_PAYLOAD_OFFSET = 576
-RAW_PAYLOAD_SIZE = 0x17D8
+RAW_PAYLOAD_SIZE = 0x17EC
 ZIMAGE_END = 0x578910
 EVT_SIZE = 0xC875
 EVT_PADDED_SIZE = 0x10000  # totalsize inflated + zero-padded: libfdt needs slack for fixups
@@ -23,11 +23,11 @@ EXPECTED = {
     "lk.bin": "5cb92494340417b1e5d18c3eaa34844dbcfec2cc8086451f087867cd06b15472",
     "boot-k32-native-evt.img": "1fe75af0428a6fbd9566505bb084af23e7e00c16c11ed0c6e19a95349c2e22c1",
     "boot-k32-native-diag.hdr": "dbbff7eeb8830c0d6cde454a97dc31be73d1cba32e6be9b21fe3c7be2b659066",
-    "boot-k32-native-diag.payload": "d6d4f2900e342901bf9100380c5f7da9c3b838d68677ebf540dbd952ac5366b1",
-    "boot-k32-native-diag-wrapper.full.img": "0457cfa302ac52830c441b9704d22f8e14bc8c27dbf0a1eff274c9f139a082cb",
-    "boot-k32-native-diag-wrapper.sparse.img": "acef9a7095c6dfc06e487b0a6afcacb54593e03c351ac2720da28eeba19eba44",
+    "boot-k32-native-diag.payload": "be910c9f87a8c53e7f870617d1711c87cf72151af46eae93bb773e4a5a38df65",
+    "boot-k32-native-diag-wrapper.full.img": "0cede4610e83662da83b7d2ad1df20c79d3bf080c8bd74fca9817dbe31b1466a",
+    "boot-k32-native-diag-wrapper.sparse.img": "b8883e47bed36dae0a1527456bbd6ddc1e0d67b91e7917f0b66202cb7c1e13a3",
 }
-RAW_PAYLOAD_SHA256 = "5b596dc5f17c72f6fba6effbf90ed517d0778c2a80d77208a77d5d04b90ce6ea"
+RAW_PAYLOAD_SHA256 = "5235d980a69e1696154cfbb22408a47ec39d56556346a41ee3be37264a60ab6c"
 
 # Assembled by tools/build-native-k32-diagnostic.py (arm-none-eabi-as
 # -march=armv7-a). Replaces the stock 8-NOP sled at the zImage entry; writes
@@ -54,6 +54,8 @@ FDT_CALLS = {
     0x4BD335DE: (0xF007, 0xFDD7),
     0x4BD335FE: (0xF007, 0xFDC7),
     0x4BD3394C: (0xF007, 0xFC20),
+    # Internal fdt_setprop call reached through fdt_setprop_u32.
+    0x4BD32F68: (0xF008, 0xF912),
 }
 
 
@@ -222,6 +224,10 @@ def main() -> None:
     require(struct.pack("<I", 0x4BD64000) in raw_payload, "cached selector base missing")
     require(struct.pack("<I", 0x4BD33700) in raw_payload, "stock selector validation base missing")
     require("*patch32 = 0;" in added_source, "source patch does not clear cached selector")
+    require("if (!fastboot) {" in added_source,
+            "K32 image loading is not guarded against fastboot fallback")
+    require("dev->read(dev, g_misc * 0x200, bootloader_msg, 0x20, USER_PART);" in added_source,
+            "misc bootloader message does not read UART_PLEASE half")
     selector_writes = [
         line for line in added_source.splitlines()
         if line.strip().startswith("*selector =")

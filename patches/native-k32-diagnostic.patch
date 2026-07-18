@@ -1,6 +1,6 @@
 --- a/lk-payload/main.c
 +++ b/lk-payload/main.c
-@@ -25,17 +25,204 @@
+@@ -25,28 +25,215 @@
  uint64_t g_boot_a, g_boot_a_x, g_boot_b, g_boot_b_x, g_lk_a, g_lk_b, g_expdb, g_misc, g_recovery;
  uint8_t boot_recovery = 0;
  
@@ -112,13 +112,7 @@
 +}
 +
 +__attribute__((naked)) static void diag_k32_jump_trampoline(void)
- {
--    for (int i = 0; i < (512 - 0x16); i++) {
--        if (strncmp((char *)&bootopt_str[i], "bootopt=", sizeof("bootopt=") - 1) == 0) {
--            if (strncmp((char *)&bootopt_str[i + 0x12], "64", sizeof("64") - 1) == 0)
--                return 1;
--            if (strncmp((char *)&bootopt_str[i + 0x12], "32", sizeof("32") - 1) == 0)
--                return 0;
++{
 +    __asm__ volatile(
 +        "push {r0-r12, lr}\n"     /* 14 regs: keeps SP 8-byte aligned */
 +        "mov r0, sp\n"
@@ -153,7 +147,13 @@
 +}
 +
 +static void install_fdt_diagnostics(void)
-+{
+ {
+-    for (int i = 0; i < (512 - 0x16); i++) {
+-        if (strncmp((char *)&bootopt_str[i], "bootopt=", sizeof("bootopt=") - 1) == 0) {
+-            if (strncmp((char *)&bootopt_str[i + 0x12], "64", sizeof("64") - 1) == 0)
+-                return 1;
+-            if (strncmp((char *)&bootopt_str[i + 0x12], "32", sizeof("32") - 1) == 0)
+-                return 0;
 +    static const uint32_t fdt_setprop_calls[] = {
 +        0x4BD33206, 0x4BD33288, 0x4BD332AA, 0x4BD332CA,
 +        0x4BD332F8, 0x4BD33322, 0x4BD3335C, 0x4BD3338A,
@@ -183,7 +183,8 @@
 +            while (1) {}
          }
 +        patch_thumb_bl(fdt_setprop_calls[i], (uint32_t)diag_fdt_setprop);
-+    }
+     }
+-    return 0;
 +
 +    /* Replace only the common error epilogue's stack-restore instruction. */
 +    volatile uint16_t *m3 = (void *)0x4BD33888;
@@ -198,8 +199,7 @@
 +    if (m4[0] != 0xF7FF || m4[1] != 0xF992) {
 +        printf("M4 hook mismatch: %04x %04x\n", m4[0], m4[1]);
 +        while (1) {}
-     }
--    return 0;
++    }
 +    patch_thumb_bl(0x4BD33DC0, (uint32_t)diag_boot_linux_fdt);
 +
 +    /* K32 jump stub: ldr r1,[sp,#48]; mov r2,r6; blx fp.  Log the final
@@ -213,6 +213,19 @@
  }
  
  void set_led_ring(uint8_t colors[12][3]) {
+     static uint8_t frame[36];
+     for (int i = 0; i < 12; i++) {
+         frame[i*3] = colors[i][0];
+-        frame[i*3+1] = colors[i][1]; 
++        frame[i*3+1] = colors[i][1];
+         frame[i*3+2] = colors[i][2];
+     }
+     led_update(1, frame);
+-    led_write(0x25, 0); 
++    led_write(0x25, 0);
+ }
+ 
+ void* led_animation_thread(void* arg) {
 @@ -79,8 +266,11 @@
  
  int read_func(struct device_t *dev, uint64_t block_off, void *dst, size_t sz, int part) {
@@ -236,23 +249,52 @@
  
      parse_gpt();
  
-@@ -342,12 +532,12 @@
-     patch32 = (void*)&dev->read;
-     *patch32 = (uint32_t)read_func;
+@@ -285,7 +475,7 @@
  
+     if (g_misc) {
+       uint8_t bootloader_msg[0x20] = { 0 };
+-      dev->read(dev, g_misc * 0x200, bootloader_msg, 0x10, USER_PART);
++      dev->read(dev, g_misc * 0x200, bootloader_msg, 0x20, USER_PART);
+       printf("Read bootloader_msg: %s\n", bootloader_msg);
+ 
+       if (strncmp(bootloader_msg, "boot-amonet", 11) == 0) {
+@@ -334,20 +524,21 @@
+     *patch++ = 0x2000; // movs r0, #0
+     *patch = 0x4770;   // bx lr
+ 
+-    // Hook bootimg read function
+-    original_read = (void*)dev->read;
+-    patch32 = (void*)0x4BD57670;
+-    *patch32 = (uint32_t)read_func;
+-
+-    patch32 = (void*)&dev->read;
+-    *patch32 = (uint32_t)read_func;
+-
 -    // Match r0t1z2's dual-ABI handoff: LK already consumed kernel_boot_opt
 -    // during platform init, so change only its cached kernel-bitness selector.
-+    // Keep LK's native ARM32 image-processing and final handoff path.  The
-+    // preloader/ATF have already consumed the live boot option, which remains
-+    // untouched; only LK's cached image selector is corrected here.
-     uint8_t *hdr = (uint8_t *)PAYLOAD_DST;
-     original_read(dev, (g_boot_a_x) * 0x200, hdr, 0x800, USER_PART);
-     if (memcmp(hdr, "ANDROID!", 8) == 0) {
+-    uint8_t *hdr = (uint8_t *)PAYLOAD_DST;
+-    original_read(dev, (g_boot_a_x) * 0x200, hdr, 0x800, USER_PART);
+-    if (memcmp(hdr, "ANDROID!", 8) == 0) {
 -        uint32_t is_64 = is_64bit_kernel(hdr + 0x40);
++    if (!fastboot) {
++      // Hook bootimg read function
++      original_read = (void*)dev->read;
++      patch32 = (void*)0x4BD57670;
++      *patch32 = (uint32_t)read_func;
++
++      patch32 = (void*)&dev->read;
++      *patch32 = (uint32_t)read_func;
++
++      // Keep LK's native ARM32 image-processing and final handoff path.  The
++      // preloader/ATF have already consumed the live boot option, which remains
++      // untouched; only LK's cached image selector is corrected here.
++      uint8_t *hdr = (uint8_t *)PAYLOAD_DST;
++      original_read(dev, (g_boot_a_x) * 0x200, hdr, 0x800, USER_PART);
++      if (memcmp(hdr, "ANDROID!", 8) == 0) {
          uint32_t **boot_arg_ptr = (void *)0x4BD664E0;
          uint32_t *boot_arg = *boot_arg_ptr;
  
-@@ -357,14 +547,19 @@
+@@ -357,17 +548,23 @@
          }
  
          patch32 = (void*)0x4BD641F4;
@@ -265,16 +307,31 @@
 +                   selector[0], selector[1], selector[2]);
 +            while (1) {}
 +        }
++
++        install_fdt_diagnostics();
  
 -        // Remove is_64? 1 : 0 temporarily
 -        uint16_t *patch16 = (void*)0x4BD33908;
 -        *patch16 = 0xBA60;
-+        install_fdt_diagnostics();
- 
+-
 -        printf("ABI diag: cached_is_64=1 (K64 FDT path), branch forced K32@0x4BD33DCA bootopt=%u cached=%u\n",
 -               boot_arg[0x53], *patch32);
+-    } else {
 +        printf("ABI handoff: native K32 loader + stock ARM32 jump bootopt=%u cached=%u opcode=%04x %04x %04x\n",
 +               boot_arg[0x53], *patch32, selector[0], selector[1], selector[2]);
-     } else {
++      } else {
          printf("ABI handoff failed: inner boot header missing\n");
          while (1) {}
++      }
+     }
+ 
+     // Accomodate the max download size
+@@ -378,7 +575,7 @@
+     cache_clean((void *)LK_BASE, LK_SIZE);
+ 
+     // Drain UART TX before re-entering LK so the ABI diag/Clean messages
+-    // are not lost when the UART controller resets during the transition. 
++    // are not lost when the UART controller resets during the transition.
+     mdelay(100);
+ 
+     restart_lk((void *)app);
