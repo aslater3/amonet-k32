@@ -36,20 +36,57 @@ EVT_PADDED_SIZE = 0x10000
 NEW_PAYLOAD_SIZE = ZIMAGE_END + EVT_PADDED_SIZE
 EVT_SHA256 = "f44630ba28f503dd7503bc7cffa2ee96a319acf2f58f1456bb6f5ff23d57dee1"
 
-# The compressed kernel embedded in the stock zImage.  The H probe changes
-# only the first two decompressed words, recompresses into the original gzip
-# envelope, and zero-pads any saved bytes so no zImage/DTB offsets move.
+# The compressed kernel embedded in the stock zImage.  The H/I probe replaces
+# only the first word with a branch and consumes six verified alignment NOPs
+# after __error_p's infinite loop. Every displaced head.S instruction is
+# executed at the same semantic point before resuming untouched code.
 KERNEL_GZIP_OFFSET = 0x46D8
 KERNEL_GZIP_SIZE = 0x5741FB
 KERNEL_GZIP_END = KERNEL_GZIP_OFFSET + KERNEL_GZIP_SIZE
 DECOMPRESSED_KERNEL_SIZE = 0xB86070
 STOCK_DECOMPRESSED_SHA256 = "3eac3f3daf9daa04f1b67e78c3f2b1ead9a74d64aae435ef5f1988916d31cbd2"
 STOCK_DECOMPRESSED_HEAD = bytes.fromhex(
-    "ee4700eb00900fe11a9029e21f0019e3")
-# str r12,[r3] emits H using state carried by the D trampoline.  The original
-# BL __hyp_stub_install moves from 0x40008000 to 0x40008004, so its immediate
-# changes by one word.  The displaced MRS r9,CPSR runs in the D trampoline.
-HEAD_ENTRY_PROBE = bytes.fromhex("00c083e5ed4700eb")
+    "ee4700eb"  # 0x00 bl __hyp_stub_install
+    "00900fe1"  # 0x04 mrs r9,cpsr
+    "1a9029e2"  # 0x08 eor r9,r9,#HYP_MODE
+    "1f0019e3"  # 0x0c tst r9,#MODE_MASK
+    "1f90c9e3"  # 0x10 bic r9,r9,#MODE_MASK
+    "d39089e3"  # 0x14 orr r9,r9,#(SVC|IRQ|FIQ)
+)
+DECOMPRESSED_BASE = 0x40008000
+HEAD_TRAMPOLINE_OFF = 0x8C8
+HEAD_TRAMPOLINE_ADDR = DECOMPRESSED_BASE + HEAD_TRAMPOLINE_OFF
+HEAD_TRAMPOLINE_SIZE = 0x18
+HEAD_HYP_STUB_ADDR = 0x40019FC0
+HEAD_RESUME_ADDR = 0x40008008
+HEAD_CAVE_STOCK = struct.pack("<I", 0xE320F000) * 6
+# Independently pinned encoding; install_head_entry_probe also assembles it
+# from HEAD_ENTRY_BRANCH_ASM and rejects any toolchain disagreement.
+HEAD_ENTRY_BRANCH = bytes.fromhex("300200ea")
+HEAD_ENTRY_BRANCH_ASM = f"""\
+    .syntax unified
+    .arm
+    .text
+    .global _start
+    .equ HEAD_PROBE, 0x{HEAD_TRAMPOLINE_ADDR:08x}
+_start:
+    b       HEAD_PROBE
+"""
+HEAD_TRAMPOLINE_ASM = f"""\
+    .syntax unified
+    .arm
+    .text
+    .global _start
+    .equ HYP_STUB, 0x{HEAD_HYP_STUB_ADDR:08x}
+    .equ HEAD_RESUME, 0x{HEAD_RESUME_ADDR:08x}
+_start:
+    str     r12, [r3]       @ H: decompressed head trampoline entered
+    bl      HYP_STUB
+    mov     r12, #'I'
+    str     r12, [r3]       @ I: __hyp_stub_install returned
+    mrs     r9, cpsr        @ original head.S instruction at offset 0x04
+    b       HEAD_RESUME     @ resume at original eor r9,r9,#HYP_MODE
+"""
 
 # The stock zImage starts with eight ARM NOPs (0x00-0x1f), then the entry
 # branch at 0x20 and the magic/start/end header fields. Replace exactly the
@@ -79,9 +116,9 @@ _start:
 
 # Decompression-completion/head-entry probe. Replace mov pc,r4 plus its six
 # trailing NOPs with seven instructions. It writes D, prepares r3/r12 so the
-# first decompressed instruction can write H, moves the displaced head.S
-# MRS r9,CPSR here, and branches through r4. Thus KD means the decompressor
-# completed but head.S did not execute; KDH proves the decompressed entry ran.
+# decompressed trampoline can write H, leaves one sled word as a NOP, and
+# branches through r4. The MRS remains after the hyp-stub call in the head
+# trampoline, preserving stock ordering.
 DEJUMP_NOP = struct.pack("<I", 0xE320F000)
 DEJUMP_OFF = 0x924
 DEJUMP_MOV_PC_R4 = 0xE1A0F004
@@ -97,8 +134,8 @@ _start:
     movt    r3, #0x1100      @ r3 = UART THR (0x11002000)
     mov     r12, #'D'
     str     r12, [r3]
-    mov     r12, #'H'       @ consumed by patched head.S first instruction
-    mrs     r9, cpsr        @ displaced head.S instruction at 0x40008004
+    mov     r12, #'H'       @ consumed by decompressed head trampoline
+    nop                      @ MRS runs after the hyp stub, as in stock head.S
     bx      r4               @ continue into the decompressed kernel
 """
 
@@ -128,6 +165,34 @@ def assemble_probe(asm: str, expected_size: int, name: str) -> bytes:
     return blob
 
 
+def assemble_linked_probe(asm: str, address: int, expected_size: int,
+                          name: str) -> bytes:
+    """Assemble ARM code whose PC-relative branches require a runtime VMA."""
+    with tempfile.TemporaryDirectory() as td:
+        src = Path(td) / "probe.s"
+        obj = Path(td) / "probe.o"
+        elf = Path(td) / "probe.elf"
+        raw = Path(td) / "probe.bin"
+        src.write_text(asm)
+        subprocess.run(
+            ["arm-none-eabi-as", "-march=armv7-a", "-o", str(obj), str(src)],
+            check=True)
+        subprocess.run(
+            ["arm-none-eabi-ld", f"-Ttext=0x{address:08x}", "-o", str(elf),
+             str(obj)],
+            check=True)
+        subprocess.run(
+            ["arm-none-eabi-objcopy", "-O", "binary", "-j", ".text",
+             str(elf), str(raw)],
+            check=True)
+        blob = raw.read_bytes()
+    if len(blob) != expected_size:
+        raise SystemExit(
+            f"ERROR: {name} probe is 0x{len(blob):x} bytes, "
+            f"expected 0x{expected_size:x}")
+    return blob
+
+
 def assemble_entry_probe() -> bytes:
     return assemble_probe(ENTRY_PROBE_ASM, 0x20, "entry")
 
@@ -136,6 +201,16 @@ def assemble_dejump_probe() -> bytes:
     # Replaces mov pc,r4 plus all six following NOPs.
     return assemble_probe(DEJUMP_PROBE_ASM, (DEJUMP_SLED_SIZE + 1) * 4,
                           "decompression")
+
+
+def assemble_head_entry_branch() -> bytes:
+    return assemble_linked_probe(HEAD_ENTRY_BRANCH_ASM, DECOMPRESSED_BASE, 4,
+                                 "head entry branch")
+
+
+def assemble_head_trampoline() -> bytes:
+    return assemble_linked_probe(HEAD_TRAMPOLINE_ASM, HEAD_TRAMPOLINE_ADDR,
+                                 HEAD_TRAMPOLINE_SIZE, "head H/I trampoline")
 
 
 def decompress_kernel_image(zimage: bytes) -> bytes:
@@ -151,7 +226,7 @@ def decompress_kernel_image(zimage: bytes) -> bytes:
 
 
 def install_head_entry_probe(zimage: bytes) -> tuple[bytes, HeadProbeMetadata]:
-    """Install H at decompressed head.S without changing zImage geometry."""
+    """Install semantics-preserving H/I markers without changing geometry."""
     offset = zimage.find(b"\x1f\x8b\x08")
     if offset != KERNEL_GZIP_OFFSET:
         raise SystemExit(f"ERROR: kernel gzip offset is 0x{offset:x}")
@@ -166,8 +241,16 @@ def install_head_entry_probe(zimage: bytes) -> tuple[bytes, HeadProbeMetadata]:
         raise SystemExit("ERROR: decompressed stock kernel hash mismatch")
     if bytes(raw[:len(STOCK_DECOMPRESSED_HEAD)]) != STOCK_DECOMPRESSED_HEAD:
         raise SystemExit("ERROR: decompressed head.S contract changed")
+    cave_end = HEAD_TRAMPOLINE_OFF + HEAD_TRAMPOLINE_SIZE
+    if bytes(raw[HEAD_TRAMPOLINE_OFF:cave_end]) != HEAD_CAVE_STOCK:
+        raise SystemExit("ERROR: decompressed head.S NOP-cave contract changed")
 
-    raw[:len(HEAD_ENTRY_PROBE)] = HEAD_ENTRY_PROBE
+    head_branch = assemble_head_entry_branch()
+    head_trampoline = assemble_head_trampoline()
+    if head_branch != HEAD_ENTRY_BRANCH:
+        raise SystemExit("ERROR: head entry branch assembly changed")
+    raw[:len(head_branch)] = head_branch
+    raw[HEAD_TRAMPOLINE_OFF:cave_end] = head_trampoline
     header = zimage[offset:offset + 10]
     if len(header) != 10 or header[:3] != b"\x1f\x8b\x08" or header[3] != 0:
         raise SystemExit("ERROR: unsupported stock gzip header")
@@ -190,8 +273,8 @@ def install_head_entry_probe(zimage: bytes) -> tuple[bytes, HeadProbeMetadata]:
     result = bytearray(zimage)
     result[offset:offset + consumed] = envelope
     metadata: HeadProbeMetadata = {
-        "marker": "H",
-        "raw_head": bytes(raw[:8]),
+        "marker": "HI",
+        "raw_head": bytes(raw[:len(head_branch)]),
         "old_stream_size": consumed,
         "new_stream_size": len(new_stream),
     }
@@ -323,7 +406,8 @@ def build(source: Path, output: Path) -> None:
     print("zimage_probe=" + " ".join(f"{w:08x}" for w in struct.unpack("<8I", probe)))
     print("zimage_dejump=" + " ".join(
         f"{w:08x}" for w in struct.unpack("<7I", payload[DEJUMP_OFF:DEJUMP_OFF + 0x1C])))
-    print(f"head_probe=H raw_head={head_meta['raw_head'].hex()} "
+    print(f"head_probe={head_meta['marker']} raw_head={head_meta['raw_head'].hex()} "
+          f"cave=0x{HEAD_TRAMPOLINE_ADDR:08x} "
           f"gzip=0x{head_meta['new_stream_size']:x}/0x{head_meta['old_stream_size']:x}")
     print(f"zimage_size=0x{ZIMAGE_END:x} evt_offset=0x{ZIMAGE_END:x} evt_size=0x{EVT_PADDED_SIZE:x} evt_raw_size=0x{EVT_SIZE:x}")
     print(f"evt_sha256={EVT_SHA256}")

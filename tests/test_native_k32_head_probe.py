@@ -25,8 +25,8 @@ class HeadEntryProbeTest(unittest.TestCase):
         patched, metadata = BUILDER.install_head_entry_probe(stock_zimage)
 
         self.assertEqual(len(patched), len(stock_zimage))
-        self.assertEqual(metadata["marker"], "H")
-        self.assertEqual(metadata["raw_head"], BUILDER.HEAD_ENTRY_PROBE)
+        self.assertEqual(metadata["marker"], "HI")
+        self.assertEqual(metadata["raw_head"], BUILDER.HEAD_ENTRY_BRANCH)
         self.assertLessEqual(metadata["new_stream_size"], metadata["old_stream_size"])
         self.assertEqual(patched[BUILDER.KERNEL_GZIP_END - 4:BUILDER.KERNEL_GZIP_END],
                          struct.pack("<I", BUILDER.DECOMPRESSED_KERNEL_SIZE))
@@ -34,10 +34,36 @@ class HeadEntryProbeTest(unittest.TestCase):
                          stock_zimage[BUILDER.ZIMAGE_END - 0x3D:])
 
         raw = BUILDER.decompress_kernel_image(patched)
-        self.assertEqual(raw[:8], BUILDER.HEAD_ENTRY_PROBE)
-        self.assertEqual(raw[8:16], BUILDER.STOCK_DECOMPRESSED_HEAD[8:16])
         stock_raw = BUILDER.decompress_kernel_image(stock_zimage)
-        self.assertEqual(raw[8:], stock_raw[8:])
+        self.assertEqual(raw[:4], BUILDER.HEAD_ENTRY_BRANCH)
+        self.assertEqual(raw[4:BUILDER.HEAD_TRAMPOLINE_OFF],
+                         stock_raw[4:BUILDER.HEAD_TRAMPOLINE_OFF])
+        self.assertEqual(
+            raw[BUILDER.HEAD_TRAMPOLINE_OFF:
+                BUILDER.HEAD_TRAMPOLINE_OFF + BUILDER.HEAD_TRAMPOLINE_SIZE],
+            BUILDER.assemble_head_trampoline(),
+        )
+        self.assertEqual(raw[BUILDER.HEAD_TRAMPOLINE_OFF +
+                             BUILDER.HEAD_TRAMPOLINE_SIZE:],
+                         stock_raw[BUILDER.HEAD_TRAMPOLINE_OFF +
+                                   BUILDER.HEAD_TRAMPOLINE_SIZE:])
+
+    def test_post_hyp_trampoline_has_exact_control_flow(self):
+        self.assertEqual(BUILDER.HEAD_ENTRY_BRANCH, bytes.fromhex(
+            "300200ea"  # 0x40008000 b 0x400088c8
+        ))
+        self.assertEqual(BUILDER.assemble_head_trampoline(), bytes.fromhex(
+            "00c083e5"  # 0x400088c8 str r12,[r3] -> H
+            "bb4500eb"  # 0x400088cc bl 0x40019fc0 (__hyp_stub_install)
+            "49c0a0e3"  # 0x400088d0 mov r12,#'I'
+            "00c083e5"  # 0x400088d4 str r12,[r3] -> I
+            "00900fe1"  # 0x400088d8 mrs r9,cpsr (stock offset 0x04)
+            "c9fdffea"  # 0x400088dc b 0x40008008 (stock eor)
+        ))
+        # The trampoline lives in six stock NOPs after __error_p's infinite
+        # loop. It emits H, calls the exact stock stub, emits I only after the
+        # return, restores MRS at its original semantic point, then resumes at
+        # the untouched safe_svcmode_maskall EOR.
 
     def test_d_to_h_trampoline_preserves_arm_boot_abi_contract(self):
         probe = BUILDER.assemble_dejump_probe()
@@ -47,13 +73,11 @@ class HeadEntryProbeTest(unittest.TestCase):
             "44c0a0e3"  # mov r12,#'D'
             "00c083e5"  # str r12,[r3]
             "48c0a0e3"  # mov r12,#'H'
-            "00900fe1"  # mrs r9,cpsr (displaced from head.S)
+            "00f020e3"  # nop; MRS now runs after the hyp stub in the head cave
             "14ff2fe1"  # bx r4
         ))
         # No instruction in this exact trampoline writes r0/r1/r2/r4; r4 is
-        # consumed only as the decompressed-kernel branch target. Moving MRS
-        # before __hyp_stub_install is safe because that inspected stock stub
-        # preserves r9 and does not change CPSR control/mode bits.
+        # consumed only as the decompressed-kernel branch target.
 
 
 if __name__ == "__main__":

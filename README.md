@@ -119,29 +119,42 @@ at `+0x20`. Interpretation:
 The builder also replaces the stock decompressor return at zImage offset
 `0x924` (the unique `mov pc,r4`) plus its following six-word ARM NOP sled with
 a seven-instruction position-independent trampoline. It writes `D`, carries the
-UART THR address and an `H` byte into the decompressed image, moves the displaced
-`mrs r9,cpsr` operation into the trampoline, and executes `bx r4`.
+UART THR address and an `H` byte into the decompressed image, and executes
+`bx r4`. The spare trampoline word is an ARM NOP; the stock `mrs r9,cpsr` now
+runs after the virtualization stub exactly where `head.S` originally required it.
 
-Inside the gzip member, the builder changes only the first two decompressed
-kernel words: the first writes `H`; the second is the original
-`bl __hyp_stub_install` retargeted for its four-byte displacement. The kernel is
-recompressed into the exact original `0x5741fb`-byte envelope. Saved space is
-zero-filled except for the mandatory final little-endian `0x00b86070` inflated-
-size word consumed by `head.S` at `input_data_end - 4`; retaining that word is
-required for safe decompressor self-relocation. The zImage end and EVT offset do
-not move. Interpretation:
+Inside the gzip member, the first decompressed word becomes a branch to six
+verified alignment NOPs at `0x400088c8–0x400088df`. These NOPs follow
+`__error_p`'s infinite loop, and the verifier confirms that the stock Image has
+no direct ARM branch into the region. The six-word H/I trampoline:
+
+1. writes `H` using the UART state carried from the D trampoline;
+2. calls the exact stock `__hyp_stub_install` at `0x40019fc0`;
+3. loads and writes `I` only after that call returns;
+4. executes the displaced stock `mrs r9,cpsr`; and
+5. branches to untouched `head.S+8` (`eor r9,r9,#HYP_MODE`).
+
+Thus the stock `safe_svcmode_maskall` sequence and every later kernel byte remain
+unchanged. The kernel is recompressed into the exact original
+`0x5741fb`-byte envelope. Saved space is zero-filled except for the mandatory
+final little-endian `0x00b86070` inflated-size word consumed by `head.S` at
+`input_data_end - 4`; retaining that word is required for safe decompressor
+self-relocation. The zImage end and EVT offset do not move. Interpretation:
 
 - `K` but no `D` → failure before the decompressor's final return, including
   cache/MMU setup, decompressor relocation, or gzip decompression.
-- `KD` but no `H` → the decompressor completed, but `bx r4` or the first fetch
-  from the decompressed kernel entry failed.
-- `KDH` → decompressed `head.S` executed; any later silence is within early ARM
-  kernel startup after the first instruction.
+- `KD` but no `H` → decompression completed, but `bx r4`, the first fetch, or
+  the branch into the decompressed H/I trampoline failed.
+- `KDH` without `I` → decompressed code ran, but the branch/call into
+  `__hyp_stub_install`, the stub itself, or its return failed.
+- `KDHI` → the virtualization stub returned; any later silence is in
+  `safe_svcmode_maskall`, CPU lookup, FDT vetting, page-table setup, the MMU
+  transition, or a later console path.
 
-Both probes are assembled at build time. The verifier decompresses the final
-artifact, checks the exact two modified head words and untouched following
-words, and verifies the fixed-size gzip envelope and complete seven-word
-D-to-H trampoline.
+All probe code is assembled and linked at its real runtime VMA. The verifier
+decompresses the final artifact, checks the entry branch and exact six-word H/I
+trampoline, proves all bytes outside the entry word and NOP cave remain stock,
+and verifies the fixed-size gzip envelope and complete seven-word D trampoline.
 
 Before GPT parsing, the payload also inspects the retained MediaTek ATF crash
 control block at `0x5F800000`: indices 14, 15, and 16 provide the crash-buffer

@@ -21,15 +21,22 @@ EVT_PADDED_SIZE = 0x10000  # totalsize inflated + zero-padded: libfdt needs slac
 EVT_SHA256 = "f44630ba28f503dd7503bc7cffa2ee96a319acf2f58f1456bb6f5ff23d57dee1"
 KERNEL_GZIP_OFFSET = 0x46D8
 KERNEL_GZIP_SIZE = 0x5741FB
-KERNEL_GZIP_PROBED_SIZE = 0x573D40
+KERNEL_GZIP_PROBED_SIZE = 0x573D44
 DECOMPRESSED_KERNEL_SIZE = 0xB86070
-HEAD_ENTRY_PROBE = bytes.fromhex("00c083e5ed4700eb")
-STOCK_DECOMPRESSED_TAIL = bytes.fromhex("1a9029e21f0019e3")
+HEAD_ENTRY_BRANCH = bytes.fromhex("300200ea")
+HEAD_TRAMPOLINE_OFF = 0x8C8
+HEAD_TRAMPOLINE_SIZE = 0x18
+HEAD_TRAMPOLINE = bytes.fromhex(
+    "00c083e5" "bb4500eb" "49c0a0e3" "00c083e5"
+    "00900fe1" "c9fdffea")
+STOCK_HEAD_AFTER_BRANCH = bytes.fromhex(
+    "00900fe1" "1a9029e2" "1f0019e3" "1f90c9e3" "d39089e3")
+STOCK_HEAD_CAVE = struct.pack("<I", 0xE320F000) * 6
 STOCK_DECOMPRESSED_SHA256 = "3eac3f3daf9daa04f1b67e78c3f2b1ead9a74d64aae435ef5f1988916d31cbd2"
 
 EXPECTED = {
     "lk.bin": "5cb92494340417b1e5d18c3eaa34844dbcfec2cc8086451f087867cd06b15472",
-    "boot-k32-native-evt.img": "5a470a04c9711b7d2588fb7992a19742b15c55d3bbde644231cf939cab6319a9",
+    "boot-k32-native-evt.img": "d94a5c8c96ced6263b0b4b1bc108a8a6a365db7b4d062d7e7f730d7c644855b9",
     "boot-k32-native-diag.hdr": "dbbff7eeb8830c0d6cde454a97dc31be73d1cba32e6be9b21fe3c7be2b659066",
     "boot-k32-native-diag.payload": "e885a546af1f896a73ac34224abb98482509f59ae3d70eae2ac4ed0f264d6e74",
     "boot-k32-native-diag-wrapper.full.img": "0c264f23f0ba043ef316f170ffa9fdcf90ec0835b92af8adbf1891607985aa4d",
@@ -51,7 +58,7 @@ DEJUMP_SLED_OFF = 0x928
 DEJUMP_SLED_SIZE = 6
 DEJUMP_PROBE = bytes.fromhex(
     "003002e3" "003141e3" "44c0a0e3" "00c083e5"
-    "48c0a0e3" "00900fe1" "14ff2fe1")
+    "48c0a0e3" "00f020e3" "14ff2fe1")
 
 FDT_CALLS = {
     0x4BD33206: (0xF007, 0xFFC3),
@@ -84,6 +91,22 @@ def require(condition: bool, message: str) -> None:
 
 def align(value: int, alignment: int) -> int:
     return (value + alignment - 1) & ~(alignment - 1)
+
+
+def arm_branch_sources(blob: bytes, base: int, target: int) -> list[int]:
+    """Return aligned ARM B/BL sites that directly target an address."""
+    sources: list[int] = []
+    for offset in range(0, len(blob) - 3, 4):
+        word = struct.unpack_from("<I", blob, offset)[0]
+        if ((word >> 28) & 0xF) == 0xF or ((word >> 25) & 0x7) != 0x5:
+            continue
+        displacement = word & 0xFFFFFF
+        if displacement & 0x800000:
+            displacement -= 1 << 24
+        destination = (base + offset + 8 + (displacement << 2)) & 0xFFFFFFFF
+        if destination == target:
+            sources.append(base + offset)
+    return sources
 
 
 def lk_slice(lk: bytes, runtime_address: int, size: int) -> bytes:
@@ -163,10 +186,13 @@ def verify_boot_image(image: bytes) -> None:
             "H-probed kernel gzip envelope mismatch")
     require(len(raw) == DECOMPRESSED_KERNEL_SIZE,
             "H-probed decompressed kernel size mismatch")
-    require(raw[:8] == HEAD_ENTRY_PROBE,
-            "decompressed head.S H probe mismatch")
-    require(raw[8:16] == STOCK_DECOMPRESSED_TAIL,
-            "decompressed head.S changed beyond the two probed words")
+    require(raw[:4] == HEAD_ENTRY_BRANCH,
+            "decompressed head.S H/I entry branch mismatch")
+    require(raw[4:4 + len(STOCK_HEAD_AFTER_BRANCH)] == STOCK_HEAD_AFTER_BRANCH,
+            "decompressed head.S stock sequence after branch changed")
+    cave_end = HEAD_TRAMPOLINE_OFF + HEAD_TRAMPOLINE_SIZE
+    require(raw[HEAD_TRAMPOLINE_OFF:cave_end] == HEAD_TRAMPOLINE,
+            "decompressed head.S H/I trampoline mismatch")
     stock = (ROOT / "inputs/boot-v184-stock32-parity-stock.img").read_bytes()
     stock_kernel_size = struct.unpack_from("<I", stock, 8)[0]
     stock_zimage = stock[0x800 + 0x200:0x800 + stock_kernel_size]
@@ -175,8 +201,14 @@ def verify_boot_image(image: bytes) -> None:
         stock_zimage[KERNEL_GZIP_OFFSET:]) + stock_inflater.flush()
     require(stock_inflater.eof and digest(stock_raw) == STOCK_DECOMPRESSED_SHA256,
             "stock decompressed kernel contract changed")
-    require(raw[8:] == stock_raw[8:],
-            "H-probed decompressed kernel differs from stock beyond bytes 0..7")
+    require(stock_raw[HEAD_TRAMPOLINE_OFF:cave_end] == STOCK_HEAD_CAVE,
+            "stock decompressed head.S NOP cave changed")
+    require(not arm_branch_sources(stock_raw, 0x40008000, 0x400088C8),
+            "stock decompressed Image directly branches into H/I NOP cave")
+    require(raw[4:HEAD_TRAMPOLINE_OFF] == stock_raw[4:HEAD_TRAMPOLINE_OFF],
+            "H/I-probed kernel differs from stock before trampoline")
+    require(raw[cave_end:] == stock_raw[cave_end:],
+            "H/I-probed kernel differs from stock after trampoline")
     gzip_pad_start = KERNEL_GZIP_OFFSET + consumed
     gzip_envelope_end = KERNEL_GZIP_OFFSET + KERNEL_GZIP_SIZE
     gzip_size_word = gzip_envelope_end - 4
@@ -312,7 +344,8 @@ def main() -> None:
     print("k32_jump_contract=PASS stub=0x4BD33BCA stock=990c:4632 log=regs+cpu+zimg+fdt+initrd")
     print("zimage_probe_contract=PASS entry=0x40008000 marker=K clobbers=r3,r12")
     print("zimage_dejump_contract=PASS return=0x924 markers=D,H target=r4")
-    print("kernel_head_probe_contract=PASS entry=0x40008000 marker=H "
+    print("kernel_head_probe_contract=PASS entry_branch=0x40008000 "
+          "trampoline=0x400088C8 markers=H,I resume=0x40008008 "
           "gzip_fixed=0x5741FB terminal_size=0x00B86070")
     print("atf_crash_contract=PASS range=0x5F800000-0x5FA00000 max=0x20000")
     print("wrapper_sparse_contract=PASS block=223215 logical=110MiB")
